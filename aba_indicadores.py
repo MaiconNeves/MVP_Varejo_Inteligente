@@ -1194,23 +1194,23 @@ def renderizar_aba_indicadores():
             df_saidas_dia = df_movs[
                 (df_movs["Tipo"] == "Saída") & (df_movs["Data_Emissao"] != "")
             ].copy()
-            if not df_saidas_dia.empty:
-                st.subheader("Evolução Diária de Vendas (Unidades)")
-                resumo_diario = (
-                    df_saidas_dia.groupby("Data_Emissao", as_index=False)["Quantidade"]
-                    .sum()
-                    .sort_values("Data_Emissao")
-                )
-                st.bar_chart(resumo_diario.set_index("Data_Emissao")["Quantidade"])
+				if not df_saidas_dia.empty:
+					st.subheader("Evolução Diária de Vendas (Unidades)")
+					resumo_diario = (
+						df_saidas_dia.groupby("Data_Emissao", as_index=False)["Quantidade"]
+						.sum()
+						.sort_values("Data_Emissao")
+					)
+					st.bar_chart(resumo_diario.set_index("Data_Emissao")["Quantidade"])
 
         if not df_kardex_completo.empty:
             st.subheader("Evolução Diária de SKUs em Ruptura (Prateleira Vazia sem Saída)")
-            ruptura_por_dia = (
-                df_kardex_completo.assign(
-                    Em_Ruptura=lambda d: np.where(d["Situacao_Dia"] == "🔴 Zerado / Ruptura", 1, 0)
-                )
-                .groupby("Data", as_index=False)["Em_Ruptura"]
-                .sum()
-                .sort_values("Data")
-            )
+				ruptura_por_dia = (
+					df_kardex_completo.assign(
+						Em_Ruptura=lambda d: np.where(d["Situacao_Dia"] == "🔴 Zerado / Ruptura", 1, 0)
+					)
+					.groupby("Data", as_index=False)["Em_Ruptura"]
+					.sum()
+					.sort_values("Data")
+				)
             st.line_chart(ruptura_por_dia.set_index("Data")["Em_Ruptura"])
