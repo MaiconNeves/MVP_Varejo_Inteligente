@@ -28,11 +28,13 @@ def calcular_indicadores_estoque(
     cobertura_minima: int = 7,
     cobertura_alvo: int = 15,
     dias_excesso: int = 45,
-    regras_cobertura_min_cat: dict[str, int] | None = None,
-    regras_cobertura_alvo_cat: dict[str, int] | None = None,
+    regras_categoria: dict[str, dict[str, int]] | None = None,
+    snap_anterior: dict | None = None,
+    usar_dmd_acumulada: bool = True,
 ) -> pd.DataFrame:
-    """Calcula os principais KPIs de estoque e impacto financeiro da ruptura."""
+    """Calcula os principais KPIs de estoque, DMD do lote vs. acumulada e impacto financeiro da ruptura."""
     df = df_consolidado.copy()
+    dias_lote = max(int(dias_periodo), 1)
 
     if "Categoria" not in df.columns:
         df["Categoria"] = "Geral"
@@ -48,14 +50,58 @@ def calcular_indicadores_estoque(
     if col_inicial not in df.columns:
         df[col_inicial] = 0.0
 
+    # Define cobertura mínima e cobertura alvo por categoria (com fallback para os valores globais)
+    if regras_categoria:
+        df["Cob_Min_Aplicada"] = df["Categoria"].map(
+            lambda c: int(regras_categoria.get(c, {}).get("cob_min", cobertura_minima))
+        )
+        df["Cob_Alvo_Aplicada"] = df["Categoria"].map(
+            lambda c: int(regras_categoria.get(c, {}).get("cob_alvo", cobertura_alvo))
+        )
+    else:
+        df["Cob_Min_Aplicada"] = int(cobertura_minima)
+        df["Cob_Alvo_Aplicada"] = int(cobertura_alvo)
+
     data_ref = pd.Timestamp.now().normalize()
     if df_movs is not None and not df_movs.empty and "Data_Emissao" in df_movs.columns:
         datas_validas = pd.to_datetime(df_movs["Data_Emissao"], errors="coerce").dropna()
         if not datas_validas.empty:
             data_ref = datas_validas.max()
 
-    # 1. Demanda Média Diária (DMD)
-    df["DMD"] = (df["Total_Saidas"] / max(dias_periodo, 1)).round(2)
+    # 1. Demanda Média Diária (DMD do Lote Atual e DMD Acumulada)
+    df["DMD_Lote"] = (df["Total_Saidas"] / dias_lote).round(2)
+
+    mapa_saidas_ant = {}
+    mapa_dias_ant = {}
+    if snap_anterior and "df_base_proximo_ciclo" in snap_anterior:
+        df_ref = snap_anterior["df_base_proximo_ciclo"]
+        if isinstance(df_ref, pd.DataFrame) and "SKU" in df_ref.columns:
+            skus_ref = df_ref["SKU"].astype(str).str.strip()
+            if "Saidas_Acum_Ref" in df_ref.columns:
+                saidas_ant_s = pd.to_numeric(df_ref["Saidas_Acum_Ref"], errors="coerce").fillna(0.0)
+                mapa_saidas_ant = dict(zip(skus_ref, saidas_ant_s))
+            if "Dias_Acum_Ref" in df_ref.columns:
+                dias_ant_s = pd.to_numeric(df_ref["Dias_Acum_Ref"], errors="coerce").fillna(0.0)
+                mapa_dias_ant = dict(zip(skus_ref, dias_ant_s))
+
+    saidas_previas = df["SKU"].astype(str).str.strip().map(mapa_saidas_ant).fillna(0.0)
+    dias_previos = df["SKU"].astype(str).str.strip().map(mapa_dias_ant).fillna(0.0)
+
+    df["Saidas_Acumuladas"] = (saidas_previas + df["Total_Saidas"]).round(2)
+    df["Dias_Acumulados"] = (dias_previos + dias_lote).astype(int)
+    df["DMD_Acumulada"] = np.where(
+        df["Dias_Acumulados"] > 0,
+        (df["Saidas_Acumuladas"] / df["Dias_Acumulados"]).round(2),
+        df["DMD_Lote"],
+    )
+
+    # Define qual DMD alimenta a Cobertura, Status e Sugestão de Compra
+    tem_historico = bool(mapa_dias_ant)
+    df["DMD"] = np.where(
+        usar_dmd_acumulada and tem_historico,
+        df["DMD_Acumulada"],
+        df["DMD_Lote"],
+    )
 
     # 2. Estoque Médio e Giro de Estoque
     df["Estoque_Medio"] = ((df[col_inicial] + df["Saldo_Calculado"]) / 2).round(2)
@@ -113,21 +159,7 @@ def calcular_indicadores_estoque(
         df["Acumulado_Pct"] = 0.0
         df["Curva_ABC"] = "C"
 
-    # 7. Aplicação das Regras de Cobertura Mínima e Cobertura Alvo por Categoria
-    mapa_cob_min = regras_cobertura_min_cat or {}
-    df["Cob_Min_Aplicada"] = (
-        df["Categoria"]
-        .map(lambda c: int(mapa_cob_min.get(c, cobertura_minima)))
-        .astype(int)
-    )
-
-    mapa_cob_alvo = regras_cobertura_alvo_cat or {}
-    df["Cob_Alvo_Aplicada"] = (
-        df["Categoria"]
-        .map(lambda c: int(mapa_cob_alvo.get(c, cobertura_alvo)))
-        .astype(int)
-    )
-
+    # 7. Diagnóstico de Status Operacional (respeitando a cobertura mínima da categoria)
     df["Status_Estoque"] = np.select(
         [
             df["Saldo_Calculado"] <= 0,
@@ -180,19 +212,25 @@ def calcular_indicadores_estoque(
 def _gerar_base_proximo_ciclo(
     df_ind: pd.DataFrame,
     data_registro: str,
+    dias_periodo: int,
     faturamento_total: float,
+    fat_medio_diario: float,
     valor_estoque_total: float,
     qtd_ruptura: int,
     perda_ruptura_total: float,
 ) -> pd.DataFrame:
-    """Monta a planilha estruturada para continuar a análise no próximo ciclo."""
+    """Monta a planilha estruturada para continuar a análise no próximo ciclo preservando o acumulado."""
     colunas_preservar = [c for c in ["SKU", "Descrição", "Categoria", "Marca", "Fator_Conversao"] if c in df_ind.columns]
     df_next = df_ind[colunas_preservar].copy()
     df_next["Qtd Inicial"] = df_ind["Saldo_Calculado"].clip(lower=0.0)
     df_next["Saldo_Anterior_Ref"] = df_ind["Saldo_Calculado"]
     df_next["Status_Anterior_Ref"] = df_ind["Status_Estoque"]
+    df_next["Saidas_Acum_Ref"] = df_ind["Saidas_Acumuladas"]
+    df_next["Dias_Acum_Ref"] = df_ind["Dias_Acumulados"]
     df_next["Ref_Data"] = data_registro
+    df_next["Ref_Dias_Periodo"] = int(dias_periodo)
     df_next["Ref_Faturamento"] = round(faturamento_total, 2)
+    df_next["Ref_Fat_Medio_Diario"] = round(fat_medio_diario, 2)
     df_next["Ref_Capital"] = round(valor_estoque_total, 2)
     df_next["Ref_Ruptura_Qtd"] = int(qtd_ruptura)
     df_next["Ref_Perda_Ruptura"] = round(perda_ruptura_total, 2)
@@ -211,17 +249,10 @@ def renderizar_aba_indicadores():
         )
         return
 
-    df_consolidado = st.session_state["df_xml_consolidado"].copy()
+    df_consolidado = st.session_state["df_xml_consolidado"]
     df_movs = st.session_state.get("df_movs_detalhadas", pd.DataFrame())
-
-    if "Categoria" not in df_consolidado.columns:
-        df_consolidado["Categoria"] = "Geral"
-    else:
-        df_consolidado["Categoria"] = (
-            df_consolidado["Categoria"].fillna("Geral").astype(str).str.strip().replace("", "Geral")
-        )
-
-    categorias_unicas = sorted(df_consolidado["Categoria"].unique().tolist())
+    snap = st.session_state.get("ponto_partida")
+    tem_comparacao = snap is not None
 
     # 1. Parâmetros de Simulação
     with st.container(border=True):
@@ -232,21 +263,21 @@ def renderizar_aba_indicadores():
             min_value=1,
             max_value=365,
             value=30,
-            help="Quantidade de dias coberta pelos XMLs importados.",
+            help="Quantidade de dias coberta pelos XMLs importados neste lote.",
         )
         cobertura_minima = p2.number_input(
-            "Cobertura mínima padrão (dias)",
+            "Cob. mínima padrão (dias)",
             min_value=1,
             max_value=90,
             value=7,
-            help="Valor padrão aplicado às categorias que não tiverem regra personalizada.",
+            help="Valor padrão de alerta caso nenhuma regra específica seja definida para a categoria.",
         )
         cobertura_alvo = p3.number_input(
-            "Cobertura alvo padrão (dias)",
+            "Cob. alvo padrão (dias)",
             min_value=1,
             max_value=180,
             value=15,
-            help="Valor padrão de dias de estoque desejado para o cálculo da sugestão de compra.",
+            help="Base padrão de dias para calcular a sugestão de compra por categoria.",
         )
         dias_excesso = p4.number_input(
             "Limite para excesso (dias)",
@@ -256,58 +287,66 @@ def renderizar_aba_indicadores():
             help="Acima deste limite o estoque é considerado excessivo.",
         )
 
-        regras_cob_min_cat: dict[str, int] = {}
-        regras_cob_alvo_cat: dict[str, int] = {}
+        usar_dmd_acumulada = True
+        if tem_comparacao:
+            usar_dmd_acumulada = st.checkbox(
+                "Usar DMD Acumulada (histórico + lote atual) para calcular Cobertura e Sugestão de Compra",
+                value=True,
+                help="Recomendado quando os lotes enviados têm durações curtas ou irregulares (ex: 8 dias, depois 4 dias, depois 5 dias).",
+            )
 
+        # Configuração individual de Cobertura Mínima e Cobertura Alvo por Categoria
+        categorias_disponiveis = sorted(
+            df_consolidado["Categoria"].fillna("Geral").astype(str).str.strip().replace("", "Geral").unique().tolist()
+            if "Categoria" in df_consolidado.columns
+            else ["Geral"]
+        )
+
+        regras_categoria: dict[str, dict[str, int]] = {}
         with st.expander("⚙️ Configurar Cobertura Mínima e Cobertura Alvo por Categoria", expanded=False):
             st.caption(
-                "Defina regras específicas por categoria de acordo com o prazo de entrega e ciclo de compra de cada fornecedor."
+                "Defina o ponto de alerta (**Cobertura Mínima**) e o ciclo de pedido (**Cobertura Alvo**) "
+                "para cada categoria conforme o prazo de entrega dos fornecedores."
             )
-            contagem_por_cat = df_consolidado.groupby("Categoria")["SKU"].count().to_dict()
-            df_regras_cat = pd.DataFrame(
-                [
-                    {
-                        "Categoria": cat,
-                        "Qtd_SKUs": int(contagem_por_cat.get(cat, 0)),
-                        "Cobertura_Minima_Dias": int(cobertura_minima),
-                        "Cobertura_Alvo_Dias": int(cobertura_alvo),
-                    }
-                    for cat in categorias_unicas
-                ]
+            df_regras_base = pd.DataFrame(
+                {
+                    "Categoria": categorias_disponiveis,
+                    "Cobertura Mínima / Alerta (dias)": [int(cobertura_minima)] * len(categorias_disponiveis),
+                    "Cobertura Alvo Compra (dias)": [int(cobertura_alvo)] * len(categorias_disponiveis),
+                }
             )
-
             df_regras_editado = st.data_editor(
-                df_regras_cat,
-                disabled=["Categoria", "Qtd_SKUs"],
+                df_regras_base,
+                disabled=["Categoria"],
                 column_config={
                     "Categoria": st.column_config.TextColumn("Categoria"),
-                    "Qtd_SKUs": st.column_config.NumberColumn("Qtd SKUs", format="%d"),
-                    "Cobertura_Minima_Dias": st.column_config.NumberColumn(
+                    "Cobertura Mínima / Alerta (dias)": st.column_config.NumberColumn(
                         "Cobertura Mínima / Alerta (dias)",
                         min_value=1,
                         max_value=180,
                         step=1,
-                        format="%d",
+                        format="%d d",
                     ),
-                    "Cobertura_Alvo_Dias": st.column_config.NumberColumn(
+                    "Cobertura Alvo Compra (dias)": st.column_config.NumberColumn(
                         "Cobertura Alvo Compra (dias)",
                         min_value=1,
                         max_value=365,
                         step=1,
-                        format="%d",
+                        format="%d d",
                     ),
                 },
                 use_container_width=True,
                 hide_index=True,
-                key=f"editor_cob_cat_{int(cobertura_minima)}_{int(cobertura_alvo)}_{len(categorias_unicas)}",
+                key=f"editor_regras_cat_{int(cobertura_minima)}_{int(cobertura_alvo)}",
             )
-
-            for _, linha in df_regras_editado.iterrows():
-                cat_nome = str(linha["Categoria"])
-                val_min = int(linha["Cobertura_Minima_Dias"]) if pd.notna(linha["Cobertura_Minima_Dias"]) else int(cobertura_minima)
-                val_alvo = int(linha["Cobertura_Alvo_Dias"]) if pd.notna(linha["Cobertura_Alvo_Dias"]) else int(cobertura_alvo)
-                regras_cob_min_cat[cat_nome] = max(val_min, 1)
-                regras_cob_alvo_cat[cat_nome] = max(val_alvo, 1)
+            for _, row in df_regras_editado.iterrows():
+                cat_nome = str(row["Categoria"])
+                cob_min_val = int(row["Cobertura Mínima / Alerta (dias)"])
+                cob_alvo_val = max(int(row["Cobertura Alvo Compra (dias)"]), cob_min_val)
+                regras_categoria[cat_nome] = {
+                    "cob_min": cob_min_val,
+                    "cob_alvo": cob_alvo_val,
+                }
 
     df_ind = calcular_indicadores_estoque(
         df_consolidado=df_consolidado,
@@ -316,11 +355,13 @@ def renderizar_aba_indicadores():
         cobertura_minima=int(cobertura_minima),
         cobertura_alvo=int(cobertura_alvo),
         dias_excesso=int(dias_excesso),
-        regras_cobertura_min_cat=regras_cob_min_cat,
-        regras_cobertura_alvo_cat=regras_cob_alvo_cat,
+        regras_categoria=regras_categoria,
+        snap_anterior=snap,
+        usar_dmd_acumulada=usar_dmd_acumulada,
     )
 
     faturamento_total = float(df_ind["Valor_Saidas"].sum())
+    fat_medio_diario = round(faturamento_total / max(int(dias_periodo), 1), 2)
     valor_estoque_total = float(df_ind["Valor_Estoque_Atual"].sum())
     qtd_ruptura = int((df_ind["Saldo_Calculado"] <= 0).sum())
     perda_ruptura_total = float(df_ind["Perda_Financeira_Ruptura"].sum())
@@ -328,73 +369,90 @@ def renderizar_aba_indicadores():
     qtd_curva_a = int((df_ind["Curva_ABC"] == "A").sum())
     total_sugerido = int(df_ind["Sugestao_Compra"].sum())
 
-    # Verifica se existe um Ponto de Partida salvo para comparação
-    snap = st.session_state.get("ponto_partida")
-    tem_comparacao = snap is not None
-
-    # 2. Cards de Resumo Executivo (com setas de evolução quando há Ponto de Partida)
+    # 2. Cards de Resumo Executivo (comparando Faturamento Médio Diário para evitar distorção entre janelas)
     st.subheader("Resumo Executivo")
     if tem_comparacao:
-        st.caption(f"📈 Comparando ciclo atual contra o **Ponto de Partida** salvo em **{snap['data_registro']}**.")
+        dias_p1 = int(snap.get("dias_periodo", 0) or 0)
+        info_dias_p1 = f" ({dias_p1}d)" if dias_p1 > 0 else ""
+        st.caption(
+            f"📈 Comparando lote atual (**{int(dias_periodo)}d**) contra o **Ponto de Partida** "
+            f"salvo em **{snap['data_registro']}**{info_dias_p1}."
+        )
 
-    m1, m2, m3, m4, m5, m6 = st.columns(6)
+    m1, m2, m3, m4, m5, m6, m7 = st.columns(7)
 
-    delta_fat = None
+    delta_fat_dia = None
     delta_cap = None
     delta_rup_qtd = None
     delta_rup_val = None
 
     if tem_comparacao:
-        diff_fat = faturamento_total - float(snap.get("faturamento_total", 0.0))
+        fat_dia_p1 = float(snap.get("fat_medio_diario", 0.0) or 0.0)
+        if fat_dia_p1 <= 0 and int(snap.get("dias_periodo", 0) or 0) > 0:
+            fat_dia_p1 = float(snap.get("faturamento_total", 0.0)) / int(snap["dias_periodo"])
+
+        if fat_dia_p1 > 0:
+            diff_fat_dia = fat_medio_diario - fat_dia_p1
+            delta_fat_dia = f"{_formatar_brl(diff_fat_dia)}/d vs. P1"
+
         diff_cap = valor_estoque_total - float(snap.get("valor_estoque_total", 0.0))
         diff_rup_qtd = qtd_ruptura - int(snap.get("qtd_ruptura", 0))
         diff_rup_val = perda_ruptura_total - float(snap.get("perda_ruptura_total", 0.0))
 
-        delta_fat = f"{_formatar_brl(diff_fat)} vs. P1"
         delta_cap = f"{_formatar_brl(diff_cap)} vs. P1"
         delta_rup_qtd = f"{diff_rup_qtd:+d} SKU(s) vs. P1"
         delta_rup_val = f"{_formatar_brl(diff_rup_val)} vs. P1"
 
     m1.metric(
-        "Faturamento (Saídas)",
+        "Faturamento Lote",
         _formatar_brl(faturamento_total),
-        delta=delta_fat,
-        delta_color="normal",
+        delta=f"{int(dias_periodo)} dia(s)",
+        delta_color="off",
     )
     m2.metric(
+        "Fat. Médio Diário",
+        f"{_formatar_brl(fat_medio_diario)}/d",
+        delta=delta_fat_dia,
+        delta_color="normal",
+        help="Faturamento dividido pelos dias da janela analisada. Permite comparar períodos de tamanhos diferentes com justiça.",
+    )
+    m3.metric(
         "Capital em Estoque",
         _formatar_brl(valor_estoque_total),
         delta=delta_cap,
         delta_color="off",
     )
-    m3.metric(
+    m4.metric(
         "Itens em Ruptura",
         f"{qtd_ruptura} SKU(s)",
         delta=delta_rup_qtd,
         delta_color="inverse",
     )
-    m4.metric(
+    m5.metric(
         "Venda Perdida (Ruptura)",
         _formatar_brl(perda_ruptura_total),
         delta=delta_rup_val if tem_comparacao else (f"-{_formatar_brl(perda_diaria_total)}/dia" if perda_diaria_total > 0 else None),
         delta_color="inverse",
         help="Estimativa de faturamento deixado na mesa pelos itens zerados com demanda ativa.",
     )
-    m5.metric("Curva A (80% Receita)", f"{qtd_curva_a} SKU(s)")
-    m6.metric("Sugestão Total Compra", f"{total_sugerido} un.")
+    m6.metric("Curva A (80% Receita)", f"{qtd_curva_a} SKU(s)")
+    m7.metric("Sugestão Compra", f"{total_sugerido} un.")
 
     # 3. Controle de Ciclos: Salvar Ponto de Partida
     with st.expander("📌 Ponto de Partida (Salvar Snapshot para Comparar Próximos Ciclos)", expanded=False):
         st.write(
             "Salve o estado atual como **Ponto de Partida (Ponto 1)**. Na próxima simulação, "
-            "o saldo final de hoje será usado automaticamente como estoque inicial e os cards mostrarão a evolução."
+            "o saldo final de hoje será usado como estoque inicial, as vendas e dias serão acumulados "
+            "para calcular a **DMD Acumulada** e o faturamento médio diário será comparado sem distorções."
         )
         c_snap1, c_snap2 = st.columns(2)
         data_agora = datetime.now().strftime("%d/%m/%Y %H:%M")
         df_next_cycle = _gerar_base_proximo_ciclo(
             df_ind=df_ind,
             data_registro=data_agora,
+            dias_periodo=int(dias_periodo),
             faturamento_total=faturamento_total,
+            fat_medio_diario=fat_medio_diario,
             valor_estoque_total=valor_estoque_total,
             qtd_ruptura=qtd_ruptura,
             perda_ruptura_total=perda_ruptura_total,
@@ -403,7 +461,9 @@ def renderizar_aba_indicadores():
         if c_snap1.button("💾 Salvar Estado Atual como Ponto de Partida", type="secondary", use_container_width=True):
             st.session_state["ponto_partida"] = {
                 "data_registro": data_agora,
+                "dias_periodo": int(dias_periodo),
                 "faturamento_total": faturamento_total,
+                "fat_medio_diario": fat_medio_diario,
                 "valor_estoque_total": valor_estoque_total,
                 "qtd_ruptura": qtd_ruptura,
                 "perda_ruptura_total": perda_ruptura_total,
@@ -411,7 +471,7 @@ def renderizar_aba_indicadores():
                 "df_indicadores_ref": df_ind.copy(),
             }
             st.success(
-                f"✅ Ponto de Partida salvo ({data_agora})! Volte na **Etapa 2** e selecione "
+                f"✅ Ponto de Partida salvo ({data_agora} | {int(dias_periodo)}d)! Volte na **Etapa 2** e selecione "
                 "'Continuar do Ponto de Partida salvo' quando quiser processar os próximos XMLs."
             )
             st.rerun()
@@ -436,7 +496,7 @@ def renderizar_aba_indicadores():
         with st.container(border=True):
             st.subheader(f"🚨 Alerta Crítico de Ruptura e Risco de Faturamento ({len(df_criticos)} item(ns))")
             st.caption(
-                "Produtos zerados ou abaixo da cobertura mínima da respectiva categoria ordenados pelo maior impacto financeiro."
+                "Produtos zerados ou abaixo da cobertura mínima da categoria ordenados pelo maior impacto financeiro."
             )
             cols_ruptura = [
                 c
@@ -448,9 +508,10 @@ def renderizar_aba_indicadores():
                     "Curva_ABC",
                     "Status_Estoque",
                     "Saldo_Calculado",
+                    "DMD_Lote",
+                    "DMD_Acumulada",
                     "Cob_Min_Aplicada",
                     "Cob_Alvo_Aplicada",
-                    "DMD",
                     "Dias_Em_Ruptura",
                     "Perda_Financeira_Ruptura",
                     "Perda_Diaria_Ruptura",
@@ -464,6 +525,8 @@ def renderizar_aba_indicadores():
                         "Curva_ABC": "Curva",
                         "Status_Estoque": "Situação",
                         "Saldo_Calculado": "Saldo",
+                        "DMD_Lote": "DMD Lote",
+                        "DMD_Acumulada": "DMD Acum.",
                         "Cob_Min_Aplicada": "Cob. Mín. (d)",
                         "Cob_Alvo_Aplicada": "Cob. Alvo (d)",
                         "Dias_Em_Ruptura": "Dias Zerado",
@@ -529,7 +592,7 @@ def renderizar_aba_indicadores():
     df_exibicao = df_filtrado.copy()
     df_exibicao["Cobertura_Exibicao"] = np.where(
         df_exibicao["Cobertura_Dias"] >= 999.0,
-        "Sem giro (>30d)",
+        f"Sem giro (>{int(dias_periodo)}d)",
         df_exibicao["Cobertura_Dias"].astype(str) + " d",
     )
     df_exibicao["Dias_Sem_Giro_Exibicao"] = df_exibicao["Dias_Sem_Giro"].apply(
@@ -549,10 +612,12 @@ def renderizar_aba_indicadores():
         "Valor_Saidas",
         "Perda_Financeira_Ruptura",
         "Participacao_Pct",
-        "DMD",
-        "Cobertura_Exibicao",
+        "DMD_Lote",
+        "DMD_Acumulada",
+        "Dias_Acumulados",
         "Cob_Min_Aplicada",
         "Cob_Alvo_Aplicada",
+        "Cobertura_Exibicao",
         "Giro_Estoque",
         "Dias_Sem_Giro_Exibicao",
         "Ultima_Saida",
@@ -571,9 +636,12 @@ def renderizar_aba_indicadores():
                 "Valor_Saidas": "Faturamento (R$)",
                 "Perda_Financeira_Ruptura": "Venda Perdida (R$)",
                 "Participacao_Pct": "% Receita",
-                "Cobertura_Exibicao": "Cobertura",
+                "DMD_Lote": "DMD Lote",
+                "DMD_Acumulada": "DMD Acum.",
+                "Dias_Acumulados": "Dias Acum.",
                 "Cob_Min_Aplicada": "Cob. Mín. (d)",
                 "Cob_Alvo_Aplicada": "Cob. Alvo (d)",
+                "Cobertura_Exibicao": "Cobertura",
                 "Giro_Estoque": "Giro",
                 "Dias_Sem_Giro_Exibicao": "Dias s/ Giro",
                 "Ultima_Saida": "Última Venda",
