@@ -4,7 +4,7 @@ from aba_entradas_saidas import renderizar_aba_xml
 from aba_indicadores import renderizar_aba_indicadores
 
 st.set_page_config(
-    page_title="MVP Varejo — Auditor de Estoque Inteligente",
+    page_title="MVP Varejo — Estoque Inteligente",
     page_icon="📦",
     layout="wide",
 )
@@ -32,7 +32,7 @@ for chave, valor in estados_iniciais.items():
 st.title("📦 MVP Varejo — Inteligência e Auditoria de Estoque")
 st.caption(
     "Monitore apenas os SKUs que realmente importam: colete a contagem física (ou use seu CSV), "
-    "cruce com os XMLs (NF-e 55 e NFC-e 65) e acompanhe a evolução por ciclos."
+    "cruze com os XMLs (NF-e 55 e NFC-e 65) e acompanhe a evolução por ciclos."
 )
 
 # Barra lateral com status do fluxo em tempo real
