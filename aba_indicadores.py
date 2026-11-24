@@ -1089,126 +1089,126 @@ def renderizar_aba_indicadores():
 				use_container_width=True,
 			)
 	# --- SUB-ABA 3: CONSOLIDADO POR CATEGORIA E MARCA ---
-	with tab_agrupado:
-		st.subheader("Consolidado por Categoria e Marca")
-		visao_grupo = st.radio(
-			"Agrupar resultados por:",
-			options=["Categoria", "Marca"],
-			horizontal=True,
-			key="radio_agrupamento_cat_marca",
-		)
-		df_grupo = _agrupar_por_dimensao(df_ind, visao_grupo, float(pct_deducoes_despesas))
-		if not df_grupo.empty:
-			top_fat = df_grupo.iloc
-			top_perda = df_grupo.sort_values(by="Venda_Perdida_Hist_RS", ascending=False).iloc
-			g1, g2, g3 = st.columns(3)
-			g1.metric(
-				f"{visao_grupo} Líder em Faturamento",
-				str(top_fat[visao_grupo]),
-				delta=f"{_formatar_brl(float(top_fat['Faturamento_RS']))} ({top_fat['Participacao_Fat_Pct']:.1f}%)",
-				delta_color="off",
+		with tab_agrupado:
+			st.subheader("Consolidado por Categoria e Marca")
+			visao_grupo = st.radio(
+				"Agrupar resultados por:",
+				options=["Categoria", "Marca"],
+				horizontal=True,
+				key="radio_agrupamento_cat_marca",
 			)
-			g2.metric(
-				f"Maior Venda Perdida ({visao_grupo})",
-				str(top_perda[visao_grupo]),
-				delta=f"-{_formatar_brl(float(top_perda['Venda_Perdida_Hist_RS']))} ({int(top_perda['Dias_Zerado_Total'])} dias zerado)",
-				delta_color="inverse" if float(top_perda["Venda_Perdida_Hist_RS"]) > 0 else "off",
-			)
-			g3.metric(
-				f"Total de {visao_grupo}s",
-				f"{len(df_grupo)}",
-				delta=f"Compra sugerida total: {int(df_grupo['Sugestao_Compra_Un'].sum())} un.",
-				delta_color="off",
-			)
-			st.markdown(f"Faturamento Realizado vs. Venda Perdida Histórica por {visao_grupo} (R$)")
-			chart_df = df_grupo.set_index(visao_grupo)[["Faturamento_RS", "Lucro_Bruto_RS", "Venda_Perdida_Hist_RS"]].rename(
-				columns={
-					"Faturamento_RS": "Faturamento Realizado (R$)",
-					"Lucro_Bruto_RS": "Lucro Bruto (R$)",
-					"Venda_Perdida_Hist_RS": "Venda Perdida Passado (R$)",
-				}
-			)
-			st.bar_chart(chart_df, use_container_width=True)
-			df_grupo_exib = df_grupo.copy()
-			df_grupo_exib["Margem_Bruta_Exib"] = df_grupo_exib["Margem_Bruta_Pct"].apply(
-				lambda x: f"{x:.1f}%" if pd.notna(x) else "Sem custo"
-			)
-			df_grupo_exib["Margem_Liq_Exib"] = df_grupo_exib["Margem_Liquida_Pct"].apply(
-				lambda x: f"{x:.1f}%" if pd.notna(x) else "Sem custo"
-			)
-			cols_grupo_exib = [
-				visao_grupo,
-				"Qtd_SKUs",
-				"Disponibilidade_Media_Pct",
-				"Dias_Zerado_Total",
-				"SKUs_Ruptura_Hoje",
-				"Faturamento_RS",
-				"Participacao_Fat_Pct",
-				"Lucro_Bruto_RS",
-				"Margem_Bruta_Exib",
-				"Lucro_Liquido_Est_RS",
-				"Margem_Liq_Exib",
-				"Venda_Perdida_Hist_RS",
-				"Lucro_Bruto_Perdido_RS",
-				"Capital_Estoque_RS",
-				"Giro_Medio",
-				"Sugestao_Compra_Un",
-			]
-			st.dataframe(
-				df_grupo_exib[cols_grupo_exib].rename(
+			df_grupo = _agrupar_por_dimensao(df_ind, visao_grupo, float(pct_deducoes_despesas))
+			if not df_grupo.empty:
+				top_fat = df_grupo.iloc
+				top_perda = df_grupo.sort_values(by="Venda_Perdida_Hist_RS", ascending=False).iloc
+				g1, g2, g3 = st.columns(3)
+				g1.metric(
+					f"{visao_grupo} Líder em Faturamento",
+					str(top_fat[visao_grupo]),
+					delta=f"{_formatar_brl(float(top_fat['Faturamento_RS']))} ({top_fat['Participacao_Fat_Pct']:.1f}%)",
+					delta_color="off",
+				)
+				g2.metric(
+					f"Maior Venda Perdida ({visao_grupo})",
+					str(top_perda[visao_grupo]),
+					delta=f"-{_formatar_brl(float(top_perda['Venda_Perdida_Hist_RS']))} ({int(top_perda['Dias_Zerado_Total'])} dias zerado)",
+					delta_color="inverse" if float(top_perda["Venda_Perdida_Hist_RS"]) > 0 else "off",
+				)
+				g3.metric(
+					f"Total de {visao_grupo}s",
+					f"{len(df_grupo)}",
+					delta=f"Compra sugerida total: {int(df_grupo['Sugestao_Compra_Un'].sum())} un.",
+					delta_color="off",
+				)
+				st.markdown(f"Faturamento Realizado vs. Venda Perdida Histórica por {visao_grupo} (R$)")
+				chart_df = df_grupo.set_index(visao_grupo)[["Faturamento_RS", "Lucro_Bruto_RS", "Venda_Perdida_Hist_RS"]].rename(
 					columns={
-						"Qtd_SKUs": "SKUs",
-						"Disponibilidade_Media_Pct": "Disponib. Média (%)",
-						"Dias_Zerado_Total": "Dias Zerado (Soma)",
-						"SKUs_Ruptura_Hoje": "Ruptura Hoje",
-						"Faturamento_RS": "Faturamento (R$)",
-						"Participacao_Fat_Pct": "% Receita",
+						"Faturamento_RS": "Faturamento Realizado (R$)",
 						"Lucro_Bruto_RS": "Lucro Bruto (R$)",
-						"Margem_Bruta_Exib": "Margem Bruta",
-						"Lucro_Liquido_Est_RS": "Lucro Líq. Est. (R$)",
-						"Margem_Liq_Exib": "Margem Líq. Est.",
-						"Venda_Perdida_Hist_RS": "Venda Perdida Hist. (R$)",
-						"Lucro_Bruto_Perdido_RS": "Lucro Bruto Perdido (R$)",
-						"Capital_Estoque_RS": "Capital Estoque (R$)",
-						"Giro_Medio": "Giro Médio",
-						"Sugestao_Compra_Un": "Sugestão Compra (un.)",
+						"Venda_Perdida_Hist_RS": "Venda Perdida Passado (R$)",
 					}
-				),
-				use_container_width=True,
-				hide_index=True,
-			)
-			csv_grupo = df_grupo.to_csv(index=False, sep=";").encode("utf-8-sig")
-			st.download_button(
-				label=f"📥 Baixar Consolidado por {visao_grupo} (.CSV)",
-				data=csv_grupo,
-				file_name=f"consolidado_{visao_grupo.lower()}_{datetime.now().strftime('%Y-%m-%d_%H-%M')}.csv",
-				mime="text/csv",
-				use_container_width=True,
-			)
+				)
+				st.bar_chart(chart_df, use_container_width=True)
+				df_grupo_exib = df_grupo.copy()
+				df_grupo_exib["Margem_Bruta_Exib"] = df_grupo_exib["Margem_Bruta_Pct"].apply(
+					lambda x: f"{x:.1f}%" if pd.notna(x) else "Sem custo"
+				)
+				df_grupo_exib["Margem_Liq_Exib"] = df_grupo_exib["Margem_Liquida_Pct"].apply(
+					lambda x: f"{x:.1f}%" if pd.notna(x) else "Sem custo"
+				)
+				cols_grupo_exib = [
+					visao_grupo,
+					"Qtd_SKUs",
+					"Disponibilidade_Media_Pct",
+					"Dias_Zerado_Total",
+					"SKUs_Ruptura_Hoje",
+					"Faturamento_RS",
+					"Participacao_Fat_Pct",
+					"Lucro_Bruto_RS",
+					"Margem_Bruta_Exib",
+					"Lucro_Liquido_Est_RS",
+					"Margem_Liq_Exib",
+					"Venda_Perdida_Hist_RS",
+					"Lucro_Bruto_Perdido_RS",
+					"Capital_Estoque_RS",
+					"Giro_Medio",
+					"Sugestao_Compra_Un",
+				]
+				st.dataframe(
+					df_grupo_exib[cols_grupo_exib].rename(
+						columns={
+							"Qtd_SKUs": "SKUs",
+							"Disponibilidade_Media_Pct": "Disponib. Média (%)",
+							"Dias_Zerado_Total": "Dias Zerado (Soma)",
+							"SKUs_Ruptura_Hoje": "Ruptura Hoje",
+							"Faturamento_RS": "Faturamento (R$)",
+							"Participacao_Fat_Pct": "% Receita",
+							"Lucro_Bruto_RS": "Lucro Bruto (R$)",
+							"Margem_Bruta_Exib": "Margem Bruta",
+							"Lucro_Liquido_Est_RS": "Lucro Líq. Est. (R$)",
+							"Margem_Liq_Exib": "Margem Líq. Est.",
+							"Venda_Perdida_Hist_RS": "Venda Perdida Hist. (R$)",
+							"Lucro_Bruto_Perdido_RS": "Lucro Bruto Perdido (R$)",
+							"Capital_Estoque_RS": "Capital Estoque (R$)",
+							"Giro_Medio": "Giro Médio",
+							"Sugestao_Compra_Un": "Sugestão Compra (un.)",
+						}
+					),
+					use_container_width=True,
+					hide_index=True,
+				)
+				csv_grupo = df_grupo.to_csv(index=False, sep=";").encode("utf-8-sig")
+				st.download_button(
+					label=f"📥 Baixar Consolidado por {visao_grupo} (.CSV)",
+					data=csv_grupo,
+					file_name=f"consolidado_{visao_grupo.lower()}_{datetime.now().strftime('%Y-%m-%d_%H-%M')}.csv",
+					mime="text/csv",
+					use_container_width=True,
+				)
 
-	# --- SUB-ABA 4: EVOLUÇÃO DIÁRIA GERAL ---
-	with tab_evolucao:
-		if df_movs is not None and not df_movs.empty and "Data_Emissao" in df_movs.columns:
-			df_saidas_dia = df_movs[
-				(df_movs["Tipo"] == "Saída") & (df_movs["Data_Emissao"] != "")
-			].copy()
-			if not df_saidas_dia.empty:
-				st.subheader("Evolução Diária de Vendas (Unidades)")
-				resumo_diario = (
-					df_saidas_dia.groupby("Data_Emissao", as_index=False)["Quantidade"]
+		# --- SUB-ABA 4: EVOLUÇÃO DIÁRIA GERAL ---
+			with tab_evolucao:
+			if df_movs is not None and not df_movs.empty and "Data_Emissao" in df_movs.columns:
+				df_saidas_dia = df_movs[
+					(df_movs["Tipo"] == "Saída") & (df_movs["Data_Emissao"] != "")
+				].copy()
+				if not df_saidas_dia.empty:
+					st.subheader("Evolução Diária de Vendas (Unidades)")
+					resumo_diario = (
+						df_saidas_dia.groupby("Data_Emissao", as_index=False)["Quantidade"]
+						.sum()
+						.sort_values("Data_Emissao")
+					)
+					st.bar_chart(resumo_diario.set_index("Data_Emissao")["Quantidade"])
+
+			if not df_kardex_completo.empty:
+				st.subheader("Evolução Diária de SKUs em Ruptura (Prateleira Vazia sem Saída)")
+				ruptura_por_dia = (
+					df_kardex_completo.assign(
+						Em_Ruptura=lambda d: np.where(d["Situacao_Dia"] == "🔴 Zerado / Ruptura", 1, 0)
+					)
+					.groupby("Data", as_index=False)["Em_Ruptura"]
 					.sum()
-					.sort_values("Data_Emissao")
+					.sort_values("Data")
 				)
-				st.bar_chart(resumo_diario.set_index("Data_Emissao")["Quantidade"])
-
-		if not df_kardex_completo.empty:
-			st.subheader("Evolução Diária de SKUs em Ruptura (Prateleira Vazia sem Saída)")
-			ruptura_por_dia = (
-				df_kardex_completo.assign(
-					Em_Ruptura=lambda d: np.where(d["Situacao_Dia"] == "🔴 Zerado / Ruptura", 1, 0)
-				)
-				.groupby("Data", as_index=False)["Em_Ruptura"]
-				.sum()
-				.sort_values("Data")
-			)
-			st.line_chart(ruptura_por_dia.set_index("Data")["Em_Ruptura"])
+				st.line_chart(ruptura_por_dia.set_index("Data")["Em_Ruptura"])
