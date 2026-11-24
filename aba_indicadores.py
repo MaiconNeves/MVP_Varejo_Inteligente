@@ -28,6 +28,8 @@ def calcular_indicadores_estoque(
     cobertura_minima: int = 7,
     cobertura_alvo: int = 15,
     dias_excesso: int = 45,
+    regras_cobertura_min_cat: dict[str, int] | None = None,
+    regras_cobertura_alvo_cat: dict[str, int] | None = None,
 ) -> pd.DataFrame:
     """Calcula os principais KPIs de estoque e impacto financeiro da ruptura."""
     df = df_consolidado.copy()
@@ -35,24 +37,12 @@ def calcular_indicadores_estoque(
     if "Categoria" not in df.columns:
         df["Categoria"] = "Geral"
     else:
-        df["Categoria"] = (
-            df["Categoria"]
-            .fillna("Geral")
-            .astype(str)
-            .str.strip()
-            .replace({"": "Geral", "nan": "Geral", "None": "Geral"})
-        )
+        df["Categoria"] = df["Categoria"].fillna("Geral").astype(str).str.strip().replace("", "Geral")
 
     if "Marca" not in df.columns:
         df["Marca"] = "Sem Marca"
     else:
-        df["Marca"] = (
-            df["Marca"]
-            .fillna("Sem Marca")
-            .astype(str)
-            .str.strip()
-            .replace({"": "Sem Marca", "nan": "Sem Marca", "None": "Sem Marca"})
-        )
+        df["Marca"] = df["Marca"].fillna("Sem Marca").astype(str).str.strip().replace("", "Sem Marca")
 
     col_inicial = "Qtd Inicial" if "Qtd Inicial" in df.columns else "Qtd Física"
     if col_inicial not in df.columns:
@@ -123,11 +113,25 @@ def calcular_indicadores_estoque(
         df["Acumulado_Pct"] = 0.0
         df["Curva_ABC"] = "C"
 
-    # 7. Diagnóstico de Status Operacional
+    # 7. Aplicação das Regras de Cobertura Mínima e Cobertura Alvo por Categoria
+    mapa_cob_min = regras_cobertura_min_cat or {}
+    df["Cob_Min_Aplicada"] = (
+        df["Categoria"]
+        .map(lambda c: int(mapa_cob_min.get(c, cobertura_minima)))
+        .astype(int)
+    )
+
+    mapa_cob_alvo = regras_cobertura_alvo_cat or {}
+    df["Cob_Alvo_Aplicada"] = (
+        df["Categoria"]
+        .map(lambda c: int(mapa_cob_alvo.get(c, cobertura_alvo)))
+        .astype(int)
+    )
+
     df["Status_Estoque"] = np.select(
         [
             df["Saldo_Calculado"] <= 0,
-            df["Cobertura_Dias"] < cobertura_minima,
+            df["Cobertura_Dias"] < df["Cob_Min_Aplicada"],
             (df["Cobertura_Dias"] > dias_excesso) & (df["Cobertura_Dias"] < 999.0),
             df["Cobertura_Dias"] == 999.0,
         ],
@@ -162,8 +166,8 @@ def calcular_indicadores_estoque(
         0.0,
     )
 
-    # 9. Sugestão de Compra para atingir a cobertura alvo (em dias)
-    necessidade_bruta = (df["DMD"] * cobertura_alvo) - df["Saldo_Calculado"]
+    # 9. Sugestão de Compra para atingir a cobertura alvo da categoria (em dias)
+    necessidade_bruta = (df["DMD"] * df["Cob_Alvo_Aplicada"]) - df["Saldo_Calculado"]
     df["Sugestao_Compra"] = np.where(
         necessidade_bruta > 0,
         np.ceil(necessidade_bruta),
@@ -182,9 +186,7 @@ def _gerar_base_proximo_ciclo(
     perda_ruptura_total: float,
 ) -> pd.DataFrame:
     """Monta a planilha estruturada para continuar a análise no próximo ciclo."""
-    colunas_preservar = [
-        c for c in ["SKU", "Descrição", "Categoria", "Marca", "Fator_Conversao"] if c in df_ind.columns
-    ]
+    colunas_preservar = [c for c in ["SKU", "Descrição", "Categoria", "Marca", "Fator_Conversao"] if c in df_ind.columns]
     df_next = df_ind[colunas_preservar].copy()
     df_next["Qtd Inicial"] = df_ind["Saldo_Calculado"].clip(lower=0.0)
     df_next["Saldo_Anterior_Ref"] = df_ind["Saldo_Calculado"]
@@ -203,18 +205,23 @@ def renderizar_aba_indicadores():
         "Análise de giro, cobertura, Curva ABC financeira, impacto da ruptura e evolução por ciclos."
     )
 
-    if (
-        "df_xml_consolidado" not in st.session_state
-        or st.session_state["df_xml_consolidado"] is None
-        or st.session_state["df_xml_consolidado"].empty
-    ):
+    if "df_xml_consolidado" not in st.session_state or st.session_state["df_xml_consolidado"] is None or st.session_state["df_xml_consolidado"].empty:
         st.info(
             "Nenhum dado consolidado encontrado. Processe os arquivos XML na **Etapa 2** primeiro."
         )
         return
 
-    df_consolidado = st.session_state["df_xml_consolidado"]
+    df_consolidado = st.session_state["df_xml_consolidado"].copy()
     df_movs = st.session_state.get("df_movs_detalhadas", pd.DataFrame())
+
+    if "Categoria" not in df_consolidado.columns:
+        df_consolidado["Categoria"] = "Geral"
+    else:
+        df_consolidado["Categoria"] = (
+            df_consolidado["Categoria"].fillna("Geral").astype(str).str.strip().replace("", "Geral")
+        )
+
+    categorias_unicas = sorted(df_consolidado["Categoria"].unique().tolist())
 
     # 1. Parâmetros de Simulação
     with st.container(border=True):
@@ -228,18 +235,18 @@ def renderizar_aba_indicadores():
             help="Quantidade de dias coberta pelos XMLs importados.",
         )
         cobertura_minima = p2.number_input(
-            "Cobertura mínima / alerta (dias)",
+            "Cobertura mínima padrão (dias)",
             min_value=1,
             max_value=90,
             value=7,
-            help="Abaixo deste limite o item entra em alerta de reposição.",
+            help="Valor padrão aplicado às categorias que não tiverem regra personalizada.",
         )
         cobertura_alvo = p3.number_input(
-            "Cobertura alvo de compra (dias)",
+            "Cobertura alvo padrão (dias)",
             min_value=1,
             max_value=180,
             value=15,
-            help="Base de dias para calcular a sugestão de compra.",
+            help="Valor padrão de dias de estoque desejado para o cálculo da sugestão de compra.",
         )
         dias_excesso = p4.number_input(
             "Limite para excesso (dias)",
@@ -249,6 +256,59 @@ def renderizar_aba_indicadores():
             help="Acima deste limite o estoque é considerado excessivo.",
         )
 
+        regras_cob_min_cat: dict[str, int] = {}
+        regras_cob_alvo_cat: dict[str, int] = {}
+
+        with st.expander("⚙️ Configurar Cobertura Mínima e Cobertura Alvo por Categoria", expanded=False):
+            st.caption(
+                "Defina regras específicas por categoria de acordo com o prazo de entrega e ciclo de compra de cada fornecedor."
+            )
+            contagem_por_cat = df_consolidado.groupby("Categoria")["SKU"].count().to_dict()
+            df_regras_cat = pd.DataFrame(
+                [
+                    {
+                        "Categoria": cat,
+                        "Qtd_SKUs": int(contagem_por_cat.get(cat, 0)),
+                        "Cobertura_Minima_Dias": int(cobertura_minima),
+                        "Cobertura_Alvo_Dias": int(cobertura_alvo),
+                    }
+                    for cat in categorias_unicas
+                ]
+            )
+
+            df_regras_editado = st.data_editor(
+                df_regras_cat,
+                disabled=["Categoria", "Qtd_SKUs"],
+                column_config={
+                    "Categoria": st.column_config.TextColumn("Categoria"),
+                    "Qtd_SKUs": st.column_config.NumberColumn("Qtd SKUs", format="%d"),
+                    "Cobertura_Minima_Dias": st.column_config.NumberColumn(
+                        "Cobertura Mínima / Alerta (dias)",
+                        min_value=1,
+                        max_value=180,
+                        step=1,
+                        format="%d",
+                    ),
+                    "Cobertura_Alvo_Dias": st.column_config.NumberColumn(
+                        "Cobertura Alvo Compra (dias)",
+                        min_value=1,
+                        max_value=365,
+                        step=1,
+                        format="%d",
+                    ),
+                },
+                use_container_width=True,
+                hide_index=True,
+                key=f"editor_cob_cat_{int(cobertura_minima)}_{int(cobertura_alvo)}_{len(categorias_unicas)}",
+            )
+
+            for _, linha in df_regras_editado.iterrows():
+                cat_nome = str(linha["Categoria"])
+                val_min = int(linha["Cobertura_Minima_Dias"]) if pd.notna(linha["Cobertura_Minima_Dias"]) else int(cobertura_minima)
+                val_alvo = int(linha["Cobertura_Alvo_Dias"]) if pd.notna(linha["Cobertura_Alvo_Dias"]) else int(cobertura_alvo)
+                regras_cob_min_cat[cat_nome] = max(val_min, 1)
+                regras_cob_alvo_cat[cat_nome] = max(val_alvo, 1)
+
     df_ind = calcular_indicadores_estoque(
         df_consolidado=df_consolidado,
         df_movs=df_movs,
@@ -256,6 +316,8 @@ def renderizar_aba_indicadores():
         cobertura_minima=int(cobertura_minima),
         cobertura_alvo=int(cobertura_alvo),
         dias_excesso=int(dias_excesso),
+        regras_cobertura_min_cat=regras_cob_min_cat,
+        regras_cobertura_alvo_cat=regras_cob_alvo_cat,
     )
 
     faturamento_total = float(df_ind["Valor_Saidas"].sum())
@@ -273,9 +335,7 @@ def renderizar_aba_indicadores():
     # 2. Cards de Resumo Executivo (com setas de evolução quando há Ponto de Partida)
     st.subheader("Resumo Executivo")
     if tem_comparacao:
-        st.caption(
-            f"📈 Comparando ciclo atual contra o **Ponto de Partida** salvo em **{snap['data_registro']}**."
-        )
+        st.caption(f"📈 Comparando ciclo atual contra o **Ponto de Partida** salvo em **{snap['data_registro']}**.")
 
     m1, m2, m3, m4, m5, m6 = st.columns(6)
 
@@ -316,9 +376,7 @@ def renderizar_aba_indicadores():
     m4.metric(
         "Venda Perdida (Ruptura)",
         _formatar_brl(perda_ruptura_total),
-        delta=delta_rup_val
-        if tem_comparacao
-        else (f"-{_formatar_brl(perda_diaria_total)}/dia" if perda_diaria_total > 0 else None),
+        delta=delta_rup_val if tem_comparacao else (f"-{_formatar_brl(perda_diaria_total)}/dia" if perda_diaria_total > 0 else None),
         delta_color="inverse",
         help="Estimativa de faturamento deixado na mesa pelos itens zerados com demanda ativa.",
     )
@@ -376,11 +434,9 @@ def renderizar_aba_indicadores():
 
     if not df_criticos.empty:
         with st.container(border=True):
-            st.subheader(
-                f"🚨 Alerta Crítico de Ruptura e Risco de Faturamento ({len(df_criticos)} item(ns))"
-            )
+            st.subheader(f"🚨 Alerta Crítico de Ruptura e Risco de Faturamento ({len(df_criticos)} item(ns))")
             st.caption(
-                "Produtos zerados ou abaixo da cobertura mínima ordenados pelo maior impacto financeiro."
+                "Produtos zerados ou abaixo da cobertura mínima da respectiva categoria ordenados pelo maior impacto financeiro."
             )
             cols_ruptura = [
                 c
@@ -392,6 +448,8 @@ def renderizar_aba_indicadores():
                     "Curva_ABC",
                     "Status_Estoque",
                     "Saldo_Calculado",
+                    "Cob_Min_Aplicada",
+                    "Cob_Alvo_Aplicada",
                     "DMD",
                     "Dias_Em_Ruptura",
                     "Perda_Financeira_Ruptura",
@@ -406,6 +464,8 @@ def renderizar_aba_indicadores():
                         "Curva_ABC": "Curva",
                         "Status_Estoque": "Situação",
                         "Saldo_Calculado": "Saldo",
+                        "Cob_Min_Aplicada": "Cob. Mín. (d)",
+                        "Cob_Alvo_Aplicada": "Cob. Alvo (d)",
                         "Dias_Em_Ruptura": "Dias Zerado",
                         "Perda_Financeira_Ruptura": "Venda Perdida Est. (R$)",
                         "Perda_Diaria_Ruptura": "Perda/Dia (R$)",
@@ -462,12 +522,7 @@ def renderizar_aba_indicadores():
     if tem_comparacao and "df_base_proximo_ciclo" in snap:
         df_ref = snap["df_base_proximo_ciclo"]
         if "SKU" in df_ref.columns and "Saldo_Anterior_Ref" in df_ref.columns:
-            mapa_saldo_ant = dict(
-                zip(
-                    df_ref["SKU"].astype(str),
-                    pd.to_numeric(df_ref["Saldo_Anterior_Ref"], errors="coerce").fillna(0.0),
-                )
-            )
+            mapa_saldo_ant = dict(zip(df_ref["SKU"].astype(str), pd.to_numeric(df_ref["Saldo_Anterior_Ref"], errors="coerce").fillna(0.0)))
             df_filtrado["Var_Saldo"] = df_filtrado["SKU"].astype(str).map(mapa_saldo_ant)
             df_filtrado["Var_Saldo"] = (df_filtrado["Saldo_Calculado"] - df_filtrado["Var_Saldo"]).round(2)
 
@@ -496,6 +551,8 @@ def renderizar_aba_indicadores():
         "Participacao_Pct",
         "DMD",
         "Cobertura_Exibicao",
+        "Cob_Min_Aplicada",
+        "Cob_Alvo_Aplicada",
         "Giro_Estoque",
         "Dias_Sem_Giro_Exibicao",
         "Ultima_Saida",
@@ -515,6 +572,8 @@ def renderizar_aba_indicadores():
                 "Perda_Financeira_Ruptura": "Venda Perdida (R$)",
                 "Participacao_Pct": "% Receita",
                 "Cobertura_Exibicao": "Cobertura",
+                "Cob_Min_Aplicada": "Cob. Mín. (d)",
+                "Cob_Alvo_Aplicada": "Cob. Alvo (d)",
                 "Giro_Estoque": "Giro",
                 "Dias_Sem_Giro_Exibicao": "Dias s/ Giro",
                 "Ultima_Saida": "Última Venda",
