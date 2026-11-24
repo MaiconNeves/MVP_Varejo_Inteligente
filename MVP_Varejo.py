@@ -29,7 +29,7 @@ for chave, valor in estados_iniciais.items():
         st.session_state[chave] = valor
 
 # Cabeçalho principal
-st.title("📦 MVP Varejo — Inteligência e Auditoria de Estoque")
+st.title("📦 MVP Varejo — Estoque Inteligente")
 st.caption(
     "Monitore apenas os SKUs que realmente importam: colete a contagem física (ou use seu CSV), "
     "cruze com os XMLs (NF-e 55 e NFC-e 65) e acompanhe a evolução por ciclos."
