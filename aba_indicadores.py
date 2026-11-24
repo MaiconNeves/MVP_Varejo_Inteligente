@@ -1100,8 +1100,8 @@ def renderizar_aba_indicadores():
         )
         df_grupo = _agrupar_por_dimensao(df_ind, visao_grupo, float(pct_deducoes_despesas))
         if not df_grupo.empty:
-            top_fat = df_grupo.iloc
-            top_perda = df_grupo.sort_values(by="Venda_Perdida_Hist_RS", ascending=False).iloc
+            top_fat = df_grupo.iloc[0]
+            top_perda = df_grupo.sort_values(by="Venda_Perdida_Hist_RS", ascending=False).iloc[0]
             g1, g2, g3 = st.columns(3)
             g1.metric(
                 f"{visao_grupo} Líder em Faturamento",
