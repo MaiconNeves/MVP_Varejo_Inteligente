@@ -1194,7 +1194,7 @@ def renderizar_aba_indicadores():
             df_saidas_dia = df_movs[
                 (df_movs["Tipo"] == "Saída") & (df_movs["Data_Emissao"] != "")
             ].copy()
-                if not df_saidas_dia.empty:
+            if not df_saidas_dia.empty:
                     st.subheader("Evolução Diária de Vendas (Unidades)")
                     resumo_diario = (
                         df_saidas_dia.groupby("Data_Emissao", as_index=False)["Quantidade"]
@@ -1205,7 +1205,7 @@ def renderizar_aba_indicadores():
 
         if not df_kardex_completo.empty:
             st.subheader("Evolução Diária de SKUs em Ruptura (Prateleira Vazia sem Saída)")
-                ruptura_por_dia = (
+            ruptura_por_dia = (
                     df_kardex_completo.assign(
                         Em_Ruptura=lambda d: np.where(d["Situacao_Dia"] == "🔴 Zerado / Ruptura", 1, 0)
                     )
