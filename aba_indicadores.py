@@ -344,30 +344,35 @@ def calcular_indicadores_estoque(
 	df["Lucro_Bruto_Perdido_Hist"] = (
 		df["Unidades_Perdidas_Hist"] * margem_unit_bruta
 	).round(2)
+	
 	em_ruptura_hoje = df["Saldo_Calculado"] <= 0
 	df["Perda_Diaria_Futura"] = np.where(
 		em_ruptura_hoje & (df["DMD"] > 0),
 		(df["DMD"] * df["Preco_Medio_Venda"]).round(2),
 		0.0,
 	)
+	
 	# 8. Curva ABC Potencial (Faturamento Realizado + Venda Perdida Histórica)
 	df["Receita_Potencial"] = (df["Valor_Saidas"] + df["Perda_Financeira_Hist"]).round(2)
 	usar_financeiro = df["Receita_Potencial"].sum() > 0
 	criterio_abc = "Receita_Potencial" if usar_financeiro else "Total_Saidas"
+	
 	df = df.sort_values(by=criterio_abc, ascending=False).reset_index(drop=True)
+	
 	total_geral = df[criterio_abc].sum()
 	if total_geral > 0:
 		 df["Participacao_Pct"] = ((df[criterio_abc] / total_geral) * 100).round(2)
 		 df["Acumulado_Pct"] = df["Participacao_Pct"].cumsum().round(2)
 		 df["Curva_ABC"] = np.select(
-		 [df["Acumulado_Pct"] <= 80.0, df["Acumulado_Pct"] <= 95.0],
-		 ["A", "B"],
-		 default="C",
+			 [df["Acumulado_Pct"] <= 80.0, df["Acumulado_Pct"] <= 95.0],
+			 ["A", "B"],
+			 default="C",
 		)
 	else:
 		 df["Participacao_Pct"] = 0.0
 		 df["Acumulado_Pct"] = 0.0
 		 df["Curva_ABC"] = "C"
+	
 	# 9. Diagnóstico Operacional (Presente + Passado)
 	df["Status_Estoque"] = np.select(
 		[
@@ -384,14 +389,17 @@ def calcular_indicadores_estoque(
 		],
 		default="🟢 Saudável",
 	)
+	
 	# 10. Sugestão de Compra baseada na DMD Real
 	necessidade_bruta = (df["DMD"] * df["Cob_Alvo_Aplicada"]) - df["Saldo_Calculado"]
 	df["Sugestao_Compra"] = np.where(
-	necessidade_bruta > 0,
-	np.ceil(necessidade_bruta),
-	0.0,
+		necessidade_bruta > 0,
+		np.ceil(necessidade_bruta),
+		0.0,
 	)
+	
 	return df, df_kardex_completo
+	
 def _gerar_base_proximo_ciclo(
 		df_ind: pd.DataFrame,
 		data_registro: str,
@@ -401,7 +409,7 @@ def _gerar_base_proximo_ciclo(
 		valor_estoque_total: float,
 		qtd_ruptura: int,
 		perda_ruptura_total: float,
-	) -> pd.DataFrame:
+) -> pd.DataFrame:
 	"""Monta a planilha estruturada para continuar a análise no próximo ciclo."""
 	colunas_preservar = [c for c in ["SKU", "Descrição", "Categoria", "Marca", "Fator_Conversao"] if c in df_ind.columns]
 	df_next = df_ind[colunas_preservar].copy()
@@ -424,47 +432,49 @@ def _agrupar_por_dimensao(df_ind: pd.DataFrame, dimensao: str, pct_deducoes_desp
 	agrupado = (
 		df_ind.groupby(dimensao, as_index=False)
 		.agg(
-		Qtd_SKUs=("SKU", "count"),
-		SKUs_Ruptura_Hoje=("Saldo_Calculado", lambda s: int((s <= 0).sum())),
-		SKUs_Com_Ruptura_Hist=("Dias_Ruptura_Hist", lambda s: int((s > 0).sum())),
-		Disponibilidade_Media_Pct=("Disponibilidade_Pct", "mean"),
-		Dias_Zerado_Total=("Dias_Ruptura_Hist", "sum"),
-		Total_Saidas_Un=("Total_Saidas", "sum"),
-		Faturamento_RS=("Valor_Saidas", "sum"),
-		CMV_RS=("CMV_Vendido", "sum"),
-		Lucro_Bruto_RS=("Lucro_Bruto", "sum"),
-		Capital_Estoque_RS=("Valor_Estoque_Atual", "sum"),
-		Venda_Perdida_Hist_RS=("Perda_Financeira_Hist", "sum"),
-		Lucro_Bruto_Perdido_RS=("Lucro_Bruto_Perdido_Hist", "sum"),
-		Giro_Medio=("Giro_Estoque", "mean"),
-		Sugestao_Compra_Un=("Sugestao_Compra", "sum"),
+			Qtd_SKUs=("SKU", "count"),
+			SKUs_Ruptura_Hoje=("Saldo_Calculado", lambda s: int((s <= 0).sum())),
+			SKUs_Com_Ruptura_Hist=("Dias_Ruptura_Hist", lambda s: int((s > 0).sum())),
+			Disponibilidade_Media_Pct=("Disponibilidade_Pct", "mean"),
+			Dias_Zerado_Total=("Dias_Ruptura_Hist", "sum"),
+			Total_Saidas_Un=("Total_Saidas", "sum"),
+			Faturamento_RS=("Valor_Saidas", "sum"),
+			CMV_RS=("CMV_Vendido", "sum"),
+			Lucro_Bruto_RS=("Lucro_Bruto", "sum"),
+			Capital_Estoque_RS=("Valor_Estoque_Atual", "sum"),
+			Venda_Perdida_Hist_RS=("Perda_Financeira_Hist", "sum"),
+			Lucro_Bruto_Perdido_RS=("Lucro_Bruto_Perdido_Hist", "sum"),
+			Giro_Medio=("Giro_Estoque", "mean"),
+			Sugestao_Compra_Un=("Sugestao_Compra", "sum"),
 		)
 		.sort_values(by="Faturamento_RS", ascending=False)
 		.reset_index(drop=True)
 	)
+	
 	fat_total_grupo = agrupado["Faturamento_RS"].sum()
 	agrupado["Participacao_Fat_Pct"] = np.where(
-	fat_total_grupo > 0,
-	((agrupado["Faturamento_RS"] / fat_total_grupo) * 100).round(2),
-	0.0,
+		fat_total_grupo > 0,
+		((agrupado["Faturamento_RS"] / fat_total_grupo) * 100).round(2),
+		0.0,
 	)
 	agrupado["Disponibilidade_Media_Pct"] = agrupado["Disponibilidade_Media_Pct"].round(1)
 	agrupado["Giro_Medio"] = agrupado["Giro_Medio"].round(2)
+	
 	agrupado["Margem_Bruta_Pct"] = np.where(
-	(agrupado["Faturamento_RS"] > 0) & (agrupado["CMV_RS"] > 0),
-	((agrupado["Lucro_Bruto_RS"] / agrupado["Faturamento_RS"]) * 100).round(2),
-	np.nan,
+		(agrupado["Faturamento_RS"] > 0) & (agrupado["CMV_RS"] > 0),
+		((agrupado["Lucro_Bruto_RS"] / agrupado["Faturamento_RS"]) * 100).round(2),
+		np.nan,
 	)
 	fator_ded = float(pct_deducoes_despesas) / 100.0
 	agrupado["Lucro_Liquido_Est_RS"] = np.where(
-	agrupado["CMV_RS"] > 0,
-	(agrupado["Lucro_Bruto_RS"] - (agrupado["Faturamento_RS"] * fator_ded)).round(2),
-	0.0,
+		agrupado["CMV_RS"] > 0,
+		(agrupado["Lucro_Bruto_RS"] - (agrupado["Faturamento_RS"] * fator_ded)).round(2),
+		0.0,
 	)
 	agrupado["Margem_Liquida_Pct"] = np.where(
-	(agrupado["Faturamento_RS"] > 0) & (agrupado["CMV_RS"] > 0),
-	((agrupado["Lucro_Liquido_Est_RS"] / agrupado["Faturamento_RS"]) * 100).round(2),
-	np.nan,
+		(agrupado["Faturamento_RS"] > 0) & (agrupado["CMV_RS"] > 0),
+		((agrupado["Lucro_Liquido_Est_RS"] / agrupado["Faturamento_RS"]) * 100).round(2),
+		np.nan,
 	)
 	return agrupado
 	
@@ -485,6 +495,7 @@ def renderizar_aba_indicadores():
 
 	df_consolidado = st.session_state["df_xml_consolidado"]
 	df_movs = st.session_state.get("df_movs_detalhadas", pd.DataFrame())
+	
 	snap = st.session_state.get("ponto_partida")
 	tem_comparacao = snap is not None
 	historico_acumulado = {}
@@ -548,51 +559,51 @@ def renderizar_aba_indicadores():
 				help="Recomendado ao importar lotes curtos/irregulares (ex: 8d -> 4d -> 5d).",
 			)
 		# Configuração de Cobertura Mínima e Cobertura Alvo por Categoria
-	categorias_disponiveis = sorted(
-		df_consolidado["Categoria"].fillna("Geral").astype(str).str.strip().replace("", "Geral").unique().tolist()
-		if "Categoria" in df_consolidado.columns
-		else ["Geral"]
-	)
-	regras_categoria = {}
-	with st.expander("⚙️ Configurar Cobertura Mínima e Cobertura Alvo por Categoria", expanded=False):
-		st.caption(
-			"Personalize os dias de Cobertura Mínima (alerta) e Cobertura Alvo (compra) por categoria. "
-			"Categorias não alteradas seguem os valores padrão acima."
+		categorias_disponiveis = sorted(
+			df_consolidado["Categoria"].fillna("Geral").astype(str).str.strip().replace("", "Geral").unique().tolist()
+			if "Categoria" in df_consolidado.columns
+			else ["Geral"]
 		)
-		df_cfg_cat = pd.DataFrame(
-			{
-				"Categoria": categorias_disponiveis,
-				"Cobertura Mínima / Alerta (dias)": [int(cobertura_minima)] * len(categorias_disponiveis),
-				"Cobertura Alvo Compra (dias)": [int(cobertura_alvo)] * len(categorias_disponiveis),
-			}
-		)
-		df_cfg_editado = st.data_editor(
-			df_cfg_cat,
-			disabled=["Categoria"],
-			column_config={
-				"Categoria": st.column_config.TextColumn("Categoria"),
-				"Cobertura Mínima / Alerta (dias)": st.column_config.NumberColumn(
-					"Cob. Mínima / Alerta (dias)",
-					min_value=1,
-					max_value=180,
-					step=1,
-				),
-				"Cobertura Alvo Compra (dias)": st.column_config.NumberColumn(
-					"Cob. Alvo Compra (dias)",
-					min_value=1,
-					max_value=365,
-					step=1,
-				),
-			},
-			use_container_width=True,
-			hide_index=True,
-			key="editor_cobertura_categoria",
-		)
-		for r_cat in df_cfg_editado.itertuples(index=False):
-			regras_categoria[str(r_cat[0])] = {
-				"cob_min": int(r_cat[1]),
-				"cob_alvo": int(r_cat[2]),
-			}
+		regras_categoria = {}
+		with st.expander("⚙️ Configurar Cobertura Mínima e Cobertura Alvo por Categoria", expanded=False):
+			st.caption(
+				"Personalize os dias de Cobertura Mínima (alerta) e Cobertura Alvo (compra) por categoria. "
+				"Categorias não alteradas seguem os valores padrão acima."
+			)
+			df_cfg_cat = pd.DataFrame(
+				{
+					"Categoria": categorias_disponiveis,
+					"Cobertura Mínima / Alerta (dias)": [int(cobertura_minima)] * len(categorias_disponiveis),
+					"Cobertura Alvo Compra (dias)": [int(cobertura_alvo)] * len(categorias_disponiveis),
+				}
+			)
+			df_cfg_editado = st.data_editor(
+				df_cfg_cat,
+				disabled=["Categoria"],
+				column_config={
+					"Categoria": st.column_config.TextColumn("Categoria"),
+					"Cobertura Mínima / Alerta (dias)": st.column_config.NumberColumn(
+						"Cob. Mínima / Alerta (dias)",
+						min_value=1,
+						max_value=180,
+						step=1,
+					),
+					"Cobertura Alvo Compra (dias)": st.column_config.NumberColumn(
+						"Cob. Alvo Compra (dias)",
+						min_value=1,
+						max_value=365,
+						step=1,
+					),
+				},
+				use_container_width=True,
+				hide_index=True,
+				key="editor_cobertura_categoria",
+			)
+			for r_cat in df_cfg_editado.itertuples(index=False):
+				regras_categoria[str(r_cat[0])] = {
+					"cob_min": int(r_cat[1]),
+					"cob_alvo": int(r_cat[2]),
+				}
 
 	df_ind, df_kardex_completo = calcular_indicadores_estoque(
 		df_consolidado=df_consolidado,
