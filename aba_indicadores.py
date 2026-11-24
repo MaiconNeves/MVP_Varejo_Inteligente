@@ -996,35 +996,35 @@ def renderizar_aba_indicadores():
 		)
 
 	# --- SUB-ABA 2: INSPETOR DE EXTRATO DIÁRIO (KARDEX) ---
-	with tab_kardex:
-		st.subheader("Inspetor de Extrato Diário (Kardex por SKU)")
-		st.caption(
-			"Auditoria dia a dia pela Regra Ouro: o dia em que a última unidade é vendida conta como disponível; "
-			"apenas dias seguintes com prateleira vazia e sem saída são marcados como ruptura."
-		)
-		
-		if df_kardex_completo.empty:
-			st.info("Sem movimentações suficientes para montar o extrato diário.")
-		else:
-			opcoes_sku_kardex = (
-				df_ind["SKU"].astype(str)
-				+ " — "
-				+ df_ind["Descrição"].astype(str)
-				+ " ("
-				+ df_ind["Categoria"].astype(str)
-				+ ")"
-			).tolist()
-			mapa_label_sku = dict(zip(opcoes_sku_kardex, df_ind["SKU"].astype(str).tolist()))
-			
-			sku_escolhido_label = st.selectbox(
-				"Selecione o produto para inspecionar o histórico diário:",
-				options=opcoes_sku_kardex,
-				key="select_sku_kardex",
-			)
-			sku_selecionado = mapa_label_sku[sku_escolhido_label]
-			
-			row_sku = df_ind[df_ind["SKU"] == sku_selecionado].iloc[0]
-			df_k_sku = df_kardex_completo[df_kardex_completo["SKU"] == sku_selecionado].copy()
+    with tab_kardex:
+        st.subheader("Inspetor de Extrato Diário (Kardex por SKU)")
+        st.caption(
+            "Auditoria dia a dia pela Regra Ouro: o dia em que a última unidade é vendida conta como disponível; "
+            "apenas dias seguintes com prateleira vazia e sem saída são marcados como ruptura."
+        )
+
+        if df_kardex_completo.empty:
+            st.info("Sem movimentações suficientes para montar o extrato diário.")
+        else:
+            opcoes_sku_kardex = (
+                df_ind["SKU"].astype(str)
+                + " — "
+                + df_ind["Descrição"].astype(str)
+                + " ("
+                + df_ind["Categoria"].astype(str)
+                + ")"
+            ).tolist()
+            mapa_label_sku = dict(zip(opcoes_sku_kardex, df_ind["SKU"].astype(str).tolist()))
+
+            sku_escolhido_label = st.selectbox(
+                "Selecione o produto para inspecionar o histórico diário:",
+                options=opcoes_sku_kardex,
+                key="select_sku_kardex",
+            )
+            sku_selecionado = mapa_label_sku[sku_escolhido_label]
+
+            row_sku = df_ind[df_ind["SKU"] == sku_selecionado].iloc[0]
+            df_k_sku = df_kardex_completo[df_kardex_completo["SKU"] == sku_selecionado].copy()
 
             # --- NOVO: Conta quantas vezes o SKU apareceu nos XMLs por dia ---
             df_k_sku["Aparicoes_XML"] = 0
@@ -1054,41 +1054,42 @@ def renderizar_aba_indicadores():
                 use_container_width=True,
             )
 
-			st.dataframe(
-				df_k_sku[
-					[
-						"Data",
-						"Aparicoes_XML",
-						"Saldo_Abertura",
-						"Entradas",
-						"Saldo_Disponivel",
-						"Saidas",
-						"Saldo_Fechamento",
-						"Situacao_Dia",
-					]
-				].rename(
-					columns={
-						"Aparicoes_XML": "Aparições XML (Linhas)",
-						"Saldo_Abertura": "Saldo Abertura",
-						"Entradas": "Entradas (+)",
-						"Saldo_Disponivel": "Saldo Disponível",
-						"Saidas": "Saídas (-)",
-						"Saldo_Fechamento": "Saldo Fechamento",
-						"Situacao_Dia": "Situação no Dia (Regra Ouro)",
-					}
-				),
-				use_container_width=True,
-				hide_index=True,
-			)
-			csv_kardex_sku = df_k_sku.to_csv(index=False, sep=";").encode("utf-8-sig")
-			st.download_button(
-				label=f"📥 Baixar Extrato Diário do SKU {sku_selecionado} (.CSV)",
-				data=csv_kardex_sku,
-				file_name=f"kardex_diario_{sku_selecionado}_{datetime.now().strftime('%Y-%m-%d')}.csv",
-				mime="text/csv",
-				use_container_width=True,
-			)
-	# --- SUB-ABA 3: CONSOLIDADO POR CATEGORIA E MARCA ---
+            st.dataframe(
+                df_k_sku[
+                    [
+                        "Data",
+                        "Aparicoes_XML",
+                        "Saldo_Abertura",
+                        "Entradas",
+                        "Saldo_Disponivel",
+                        "Saidas",
+                        "Saldo_Fechamento",
+                        "Situacao_Dia",
+                    ]
+                ].rename(
+                    columns={
+                        "Aparicoes_XML": "Aparições XML (Linhas)",
+                        "Saldo_Abertura": "Saldo Abertura",
+                        "Entradas": "Entradas (+)",
+                        "Saldo_Disponivel": "Saldo Disponível",
+                        "Saidas": "Saídas (-)",
+                        "Saldo_Fechamento": "Saldo Fechamento",
+                        "Situacao_Dia": "Situação no Dia (Regra Ouro)",
+                    }
+                ),
+                use_container_width=True,
+                hide_index=True,
+            )
+            csv_kardex_sku = df_k_sku.to_csv(index=False, sep=";").encode("utf-8-sig")
+            st.download_button(
+                label=f"📥 Baixar Extrato Diário do SKU {sku_selecionado} (.CSV)",
+                data=csv_kardex_sku,
+                file_name=f"kardex_diario_{sku_selecionado}_{datetime.now().strftime('%Y-%m-%d')}.csv",
+                mime="text/csv",
+                use_container_width=True,
+            )
+
+    # --- SUB-ABA 3: CONSOLIDADO POR CATEGORIA E MARCA ---
     with tab_agrupado:
         st.subheader("Consolidado por Categoria e Marca")
         visao_grupo = st.radio(
@@ -1178,6 +1179,7 @@ def renderizar_aba_indicadores():
                 hide_index=True,
             )
             csv_grupo = df_grupo.to_csv(index=False, sep=";").encode("utf-8-sig")
+
             st.download_button(
                 label=f"📥 Baixar Consolidado por {visao_grupo} (.CSV)",
                 data=csv_grupo,
