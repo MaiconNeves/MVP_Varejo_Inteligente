@@ -1,4 +1,4 @@
-from datetime import datetime, timedelta
+from datetime import datetime
 import numpy as np
 import pandas as pd
 import streamlit as st
@@ -11,143 +11,6 @@ def _formatar_brl(valor: float) -> str:
     return f"{sinal}R$ {abs_val:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
 
 
-def _formatar_pct(valor: float | None) -> str:
-    """Formata um percentual float com 1 casa decimal."""
-    if valor is None or pd.isna(valor):
-        return "Sem custo"
-    return f"{valor:.1f}%".replace(".", ",")
-
-
-def _obter_janela_datas(df_movs: pd.DataFrame | None, dias_periodo: int) -> tuple[pd.Timestamp, pd.Timestamp, list[str]]:
-    """Define a data inicial, data final e a lista de datas YYYY-MM-DD da janela analisada."""
-    dias_validos = max(int(dias_periodo), 1)
-    data_fim = pd.Timestamp.now().normalize()
-
-    if df_movs is not None and not df_movs.empty and "Data_Emissao" in df_movs.columns:
-        datas_validas = pd.to_datetime(df_movs["Data_Emissao"], errors="coerce").dropna()
-        if not datas_validas.empty:
-            data_fim = datas_validas.max().normalize()
-            data_min_xml = datas_validas.min().normalize()
-            span_xml = int((data_fim - data_min_xml).days) + 1
-            if span_xml > dias_validos:
-                data_inicio = data_min_xml
-            else:
-                data_inicio = data_fim - pd.Timedelta(days=dias_validos - 1)
-            datas_idx = pd.date_range(start=data_inicio, end=data_fim, freq="D")
-            return data_inicio, data_fim, [d.strftime("%Y-%m-%d") for d in datas_idx]
-
-    data_inicio = data_fim - pd.Timedelta(days=dias_validos - 1)
-    datas_idx = pd.date_range(start=data_inicio, end=data_fim, freq="D")
-    return data_inicio, data_fim, [d.strftime("%Y-%m-%d") for d in datas_idx]
-
-
-def _reconstruir_kardex_diario(
-    df_base: pd.DataFrame,
-    df_movs: pd.DataFrame | None,
-    dias_periodo: int,
-    col_inicial: str,
-) -> tuple[pd.DataFrame, pd.DataFrame, pd.Timestamp]:
-    """
-    Reconstrói o extrato diário (Kardex) de cada SKU dia a dia.
-    Retorna:
-      - df_metricas_hist: resumo histórico por SKU
-      - df_kardex_completo: tabela dia a dia com Saldo_Abertura, Entradas, Saidas, Saldo_Fechamento e Em_Ruptura
-      - data_fim: data final de referência da janela
-    """
-    _, data_fim, lista_datas = _obter_janela_datas(df_movs, dias_periodo)
-    n_dias_janela = max(len(lista_datas), 1)
-
-    mov_diario_map = {}
-    if df_movs is not None and not df_movs.empty and {"SKU", "Tipo", "Data_Emissao", "Quantidade"}.issubset(df_movs.columns):
-        df_m = df_movs.copy()
-        df_m["SKU"] = df_m["SKU"].astype(str).str.strip()
-        df_m["Data_Dia"] = df_m["Data_Emissao"].astype(str).str.slice(0, 10)
-        df_m["Quantidade"] = pd.to_numeric(df_m["Quantidade"], errors="coerce").fillna(0.0)
-
-        agrupado = df_m.groupby(["SKU", "Data_Dia", "Tipo"], as_index=False)["Quantidade"].sum()
-        for row in agrupado.itertuples(index=False):
-            chave = (row.SKU, row.Data_Dia)
-            if chave not in mov_diario_map:
-                mov_diario_map[chave] = {"Entrada": 0.0, "Saída": 0.0}
-            if row.Tipo == "Entrada":
-                mov_diario_map[chave]["Entrada"] += float(row.Quantidade)
-            elif row.Tipo == "Saída":
-                mov_diario_map[chave]["Saída"] += float(row.Quantidade)
-
-    registros_hist = []
-    registros_kardex = []
-
-    for row in df_base.itertuples(index=False):
-        sku = str(getattr(row, "SKU")).strip()
-        desc = str(getattr(row, "Descrição", ""))
-        cat = str(getattr(row, "Categoria", "Geral"))
-        marca = str(getattr(row, "Marca", "Sem Marca"))
-        saldo_corrente = float(getattr(row, col_inicial, 0.0) or 0.0)
-
-        dias_com_estoque = 0
-        dias_zerado = 0
-        episodios_ruptura = 0
-        soma_saldos_diarios = 0.0
-        estava_zerado_antes = saldo_corrente <= 0
-
-        for data_str in lista_datas:
-            saldo_abertura = saldo_corrente
-            mov = mov_diario_map.get((sku, data_str), {"Entrada": 0.0, "Saída": 0.0})
-            entradas_dia = mov["Entrada"]
-            saidas_dia = mov["Saída"]
-            saldo_fechamento = saldo_abertura + entradas_dia - saidas_dia
-
-            # Considera que houve disponibilidade no dia se começou com estoque ou recebeu mercadoria no dia
-            disponivel_no_dia = (saldo_abertura > 0) or (entradas_dia > 0)
-            em_ruptura_dia = saldo_fechamento <= 0
-
-            if disponivel_no_dia:
-                dias_com_estoque += 1
-            if em_ruptura_dia:
-                dias_zerado += 1
-                if not estava_zerado_antes:
-                    episodios_ruptura += 1
-
-            estava_zerado_antes = em_ruptura_dia
-            soma_saldos_diarios += max(saldo_fechamento, 0.0)
-            saldo_corrente = saldo_fechamento
-
-            registros_kardex.append(
-                {
-                    "SKU": sku,
-                    "Descrição": desc,
-                    "Categoria": cat,
-                    "Marca": marca,
-                    "Data": data_str,
-                    "Saldo_Abertura": round(saldo_abertura, 2),
-                    "Entradas": round(entradas_dia, 2),
-                    "Saidas": round(saidas_dia, 2),
-                    "Saldo_Fechamento": round(saldo_fechamento, 2),
-                    "Em_Ruptura": em_ruptura_dia,
-                    "Situacao_Dia": "🔴 Zerado / Ruptura" if em_ruptura_dia else "🟢 Com Estoque",
-                }
-            )
-
-        disponibilidade_pct = round((dias_com_estoque / n_dias_janela) * 100, 1)
-        estoque_medio_diario = round(soma_saldos_diarios / n_dias_janela, 2)
-
-        registros_hist.append(
-            {
-                "SKU": sku,
-                "Dias_Janela_Hist": n_dias_janela,
-                "Dias_Com_Estoque": dias_com_estoque,
-                "Dias_Ruptura_Hist": dias_zerado,
-                "Episodios_Ruptura": episodios_ruptura,
-                "Disponibilidade_Pct": disponibilidade_pct,
-                "Estoque_Medio_Diario": estoque_medio_diario,
-            }
-        )
-
-    df_metricas_hist = pd.DataFrame(registros_hist)
-    df_kardex_completo = pd.DataFrame(registros_kardex)
-    return df_metricas_hist, df_kardex_completo, data_fim
-
-
 def _calcular_dias_sem_giro(df: pd.DataFrame, data_referencia: pd.Timestamp) -> pd.Series:
     """Calcula quantos dias se passaram desde a última saída registrada até a data de referência."""
     if "Ultima_Saida" not in df.columns:
@@ -158,6 +21,146 @@ def _calcular_dias_sem_giro(df: pd.DataFrame, data_referencia: pd.Timestamp) -> 
     return dias.clip(lower=0)
 
 
+def _reconstruir_kardex_diario(
+    df_consolidado: pd.DataFrame,
+    df_movs: pd.DataFrame | None,
+    dias_periodo: int,
+    col_inicial: str,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """
+    Reconstrói o extrato diário (Kardex) de cada SKU dentro da janela analisada
+    aplicando a Regra Ouro de disponibilidade e ruptura:
+
+    1. Dia com Estoque Disponível: (Saldo_Abertura + Entradas > 0) OU (Saidas > 0).
+       - Inclui o dia em que o estoque zera vendendo a última unidade.
+       - Inclui dias com estoque parado sem venda (Saldo_Abertura > 0, Saidas == 0).
+    2. Dia Zerado / Ruptura: (Saldo_Abertura + Entradas <= 0) E (Saidas == 0).
+       - Apenas dias com prateleira vazia e sem nenhuma saída acumulam perda.
+    """
+    n_dias = max(int(dias_periodo), 1)
+    datas_mov = pd.Series(dtype="datetime64[ns]")
+
+    if df_movs is not None and not df_movs.empty and "Data_Emissao" in df_movs.columns:
+        datas_mov = pd.to_datetime(df_movs["Data_Emissao"], errors="coerce").dropna()
+
+    if not datas_mov.empty:
+        data_fim = datas_mov.max().normalize()
+        data_inicio_mov = datas_mov.min().normalize()
+        data_inicio_janela = data_fim - pd.Timedelta(days=n_dias - 1)
+        data_inicio = min(data_inicio_mov, data_inicio_janela)
+    else:
+        data_fim = pd.Timestamp.now().normalize()
+        data_inicio = data_fim - pd.Timedelta(days=n_dias - 1)
+
+    eixo_datas = pd.date_range(start=data_inicio, end=data_fim, freq="D")
+    datas_str = [d.strftime("%Y-%m-%d") for d in eixo_datas]
+    total_dias_calendario = len(datas_str)
+
+    mov_agrupado = {}
+    if df_movs is not None and not df_movs.empty and "Data_Emissao" in df_movs.columns:
+        df_m = df_movs.copy()
+        df_m["SKU"] = df_m["SKU"].astype(str).str.strip()
+        df_m["Data_Norm"] = pd.to_datetime(df_m["Data_Emissao"], errors="coerce").dt.strftime("%Y-%m-%d")
+        df_m = df_m.dropna(subset=["Data_Norm"])
+        piv = (
+            df_m.groupby(["SKU", "Data_Norm", "Tipo"], as_index=False)["Quantidade"]
+            .sum()
+        )
+        for row in piv.itertuples(index=False):
+            chave = (row.SKU, row.Data_Norm)
+            if chave not in mov_agrupado:
+                mov_agrupado[chave] = {"Entrada": 0.0, "Saída": 0.0}
+            if row.Tipo == "Entrada":
+                mov_agrupado[chave]["Entrada"] += float(row.Quantidade)
+            elif row.Tipo == "Saída":
+                mov_agrupado[chave]["Saída"] += float(row.Quantidade)
+
+    resumos_sku = []
+    registros_kardex = []
+
+    for row in df_consolidado.itertuples(index=False):
+        sku = str(getattr(row, "SKU")).strip()
+        desc = str(getattr(row, "Descrição", ""))
+        cat = str(getattr(row, "Categoria", "Geral"))
+        marca = str(getattr(row, "Marca", "Sem Marca"))
+
+        idx_ini = df_consolidado.columns.get_loc(col_inicial)
+        saldo_corrente = float(row[idx_ini]) if pd.notna(row[idx_ini]) else 0.0
+
+        dias_com_estoque = 0
+        dias_ruptura_hist = 0
+        episodios_ruptura = 0
+        saldos_diarios = []
+        em_ruptura_anterior = False
+
+        for d_str in datas_str:
+            abertura = round(saldo_corrente, 4)
+            mov_dia = mov_agrupado.get((sku, d_str), {"Entrada": 0.0, "Saída": 0.0})
+            entradas_dia = round(mov_dia["Entrada"], 4)
+            saidas_dia = round(mov_dia["Saída"], 4)
+
+            saldo_disponivel_dia = round(abertura + entradas_dia, 4)
+            fechamento = round(saldo_disponivel_dia - saídas_dia if False else saldo_disponivel_dia - saidas_dia, 4)
+
+            # Regra Ouro:
+            # 1) Dia com Estoque Disponível: (Saldo_Abertura + Entradas > 0) OU (Saidas > 0)
+            # 2) Dia Zerado / Ruptura: (Saldo_Abertura + Entradas <= 0) E (Saidas == 0)
+            teve_estoque_disponivel = (saldo_disponivel_dia > 0) or (saidas_dia > 0)
+
+            if teve_estoque_disponivel:
+                dias_com_estoque += 1
+                if fechamento <= 0 and saidas_dia > 0:
+                    situacao_dia = "🟡 Zerou na Venda (Disponível)"
+                elif saidas_dia == 0:
+                    situacao_dia = "🟢 Estoque Parado (Sem Venda)"
+                else:
+                    situacao_dia = "🟢 Com Estoque"
+                em_ruptura_anterior = False
+            else:
+                dias_ruptura_hist += 1
+                situacao_dia = "🔴 Zerado / Ruptura"
+                if not em_ruptura_anterior:
+                    episodios_ruptura += 1
+                    em_ruptura_anterior = True
+
+            saldos_diarios.append(max(fechamento, 0.0))
+            registros_kardex.append(
+                {
+                    "SKU": sku,
+                    "Descrição": desc,
+                    "Categoria": cat,
+                    "Marca": marca,
+                    "Data": d_str,
+                    "Saldo_Abertura": round(abertura, 2),
+                    "Entradas": round(entradas_dia, 2),
+                    "Saldo_Disponivel": round(saldo_disponivel_dia, 2),
+                    "Saidas": round(saidas_dia, 2),
+                    "Saldo_Fechamento": round(fechamento, 2),
+                    "Situacao_Dia": situacao_dia,
+                }
+            )
+            saldo_corrente = fechamento
+
+        estoque_medio_diario = round(float(np.mean(saldos_diarios)), 2) if saldos_diarios else 0.0
+        disponibilidade_pct = round((dias_com_estoque / max(total_dias_calendario, 1)) * 100, 1)
+
+        resumos_sku.append(
+            {
+                "SKU": sku,
+                "Dias_Janela_Kardex": total_dias_calendario,
+                "Dias_Com_Estoque": int(dias_com_estoque),
+                "Dias_Ruptura_Hist": int(dias_ruptura_hist),
+                "Episodios_Ruptura": int(episodios_ruptura),
+                "Disponibilidade_Pct": disponibilidade_pct,
+                "Estoque_Medio_Diario": estoque_medio_diario,
+            }
+        )
+
+    df_resumo_kardex = pd.DataFrame(resumos_sku)
+    df_kardex_completo = pd.DataFrame(registros_kardex)
+    return df_resumo_kardex, df_kardex_completo
+
+
 def calcular_indicadores_estoque(
     df_consolidado: pd.DataFrame,
     df_movs: pd.DataFrame | None = None,
@@ -165,14 +168,14 @@ def calcular_indicadores_estoque(
     cobertura_minima: int = 7,
     cobertura_alvo: int = 15,
     dias_excesso: int = 45,
-    pct_deducoes_liq: float = 15.0,
-    regras_categoria: dict[str, dict[str, int]] | None = None,
-    snap_anterior: dict | None = None,
+    regras_categoria: dict | None = None,
+    historico_acumulado: dict | None = None,
     usar_dmd_acumulada: bool = True,
+    pct_deducoes_despesas: float = 15.0,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     """
-    Calcula os KPIs tendo a reconstrução histórica dia a dia (Kardex) como base principal,
-    incluindo Margem Bruta (via XML) e Margem Líquida Estimada (via % deduções/despesas).
+    Calcula os indicadores de estoque com base na reconstrução histórica diária (Kardex)
+    aplicando a Regra Ouro para disponibilidade e ruptura, além de Margem Bruta e Líquida.
     """
     df = df_consolidado.copy()
     df["SKU"] = df["SKU"].astype(str).str.strip()
@@ -191,63 +194,80 @@ def calcular_indicadores_estoque(
     if col_inicial not in df.columns:
         df[col_inicial] = 0.0
 
-    # 1. Reconstrução histórica dia a dia (Passado do SKU)
-    df_hist, df_kardex, data_ref = _reconstruir_kardex_diario(
-        df_base=df,
+    # 1. Reconstrução do Kardex Diário (Regra Ouro)
+    df_resumo_kardex, df_kardex_completo = _reconstruir_kardex_diario(
+        df_consolidado=df,
         df_movs=df_movs,
         dias_periodo=dias_periodo,
         col_inicial=col_inicial,
     )
-    df = df.merge(df_hist, on="SKU", how="left")
+    df = df.merge(df_resumo_kardex, on="SKU", how="left")
 
-    # 2. Demanda Média Diária REAL (descontando os dias em que o SKU estava sem estoque)
-    df["DMD_Bruta_Lote"] = (df["Total_Saidas"] / df["Dias_Janela_Hist"].clip(lower=1)).round(2)
-    df["DMD_Real_Hist"] = np.where(
-        df["Dias_Com_Estoque"] > 0,
-        (df["Total_Saidas"] / df["Dias_Com_Estoque"]).round(2),
-        df["DMD_Bruta_Lote"],
+    # 2. Regras personalizadas de Cobertura Mínima e Alvo por Categoria
+    regras_cat = regras_categoria or {}
+    df["Cob_Min_Aplicada"] = df["Categoria"].map(
+        lambda c: int(regras_cat.get(c, {}).get("cob_min", cobertura_minima))
+    )
+    df["Cob_Alvo_Aplicada"] = df["Categoria"].map(
+        lambda c: int(regras_cat.get(c, {}).get("cob_alvo", cobertura_alvo))
     )
 
-    # 3. Histórico Acumulado entre ciclos (Ponto de Partida)
-    saidas_prev = pd.Series(0.0, index=df.index)
-    dias_disp_prev = pd.Series(0.0, index=df.index)
-    if snap_anterior is not None and "df_base_proximo_ciclo" in snap_anterior:
-        df_ref = snap_anterior["df_base_proximo_ciclo"].copy()
-        if "SKU" in df_ref.columns:
-            df_ref["SKU"] = df_ref["SKU"].astype(str).str.strip()
-            if "Saidas_Acum_Ref" in df_ref.columns:
-                mapa_s = dict(zip(df_ref["SKU"], pd.to_numeric(df_ref["Saidas_Acum_Ref"], errors="coerce").fillna(0.0)))
-                saidas_prev = df["SKU"].map(mapa_s).fillna(0.0)
-            if "Dias_Disp_Acum_Ref" in df_ref.columns:
-                mapa_d = dict(zip(df_ref["SKU"], pd.to_numeric(df_ref["Dias_Disp_Acum_Ref"], errors="coerce").fillna(0.0)))
-                dias_disp_prev = df["SKU"].map(mapa_d).fillna(0.0)
-            elif "Dias_Acum_Ref" in df_ref.columns:
-                mapa_d = dict(zip(df_ref["SKU"], pd.to_numeric(df_ref["Dias_Acum_Ref"], errors="coerce").fillna(0.0)))
-                dias_disp_prev = df["SKU"].map(mapa_d).fillna(0.0)
+    data_ref = pd.Timestamp.now().normalize()
+    if df_movs is not None and not df_movs.empty and "Data_Emissao" in df_movs.columns:
+        datas_validas = pd.to_datetime(df_movs["Data_Emissao"], errors="coerce").dropna()
+        if not datas_validas.empty:
+            data_ref = datas_validas.max()
+
+    # 3. Demanda Média Diária (DMD Real descontando dias zerados sem saída vs. DMD Bruta)
+    dias_disp_lote = df["Dias_Com_Estoque"].clip(lower=1)
+    df["DMD_Real_Hist"] = (df["Total_Saidas"] / dias_disp_lote).round(2)
+    df["DMD_Bruta_Lote"] = (df["Total_Saidas"] / max(dias_periodo, 1)).round(2)
+
+    # Histórico acumulado entre ciclos (Ponto de Partida)
+    hist_acum = historico_acumulado or {}
+    saidas_prev = df["SKU"].map(lambda s: float(hist_acum.get(s, {}).get("saidas_acum", 0.0)))
+    dias_disp_prev = df["SKU"].map(lambda s: float(hist_acum.get(s, {}).get("dias_disp_acum", 0.0)))
 
     df["Saidas_Acumuladas"] = (saidas_prev + df["Total_Saidas"]).round(2)
     df["Dias_Disp_Acumulados"] = (dias_disp_prev + df["Dias_Com_Estoque"]).round(0)
     df["DMD_Real_Acumulada"] = np.where(
         df["Dias_Disp_Acumulados"] > 0,
-        (df["Saidas_Acumuladas"] / df["Dias_Disp_Acumulados"]).round(2),
+        (df["Saidas_Acumuladas"] / df["Dias_Disp_Acumulados"].clip(lower=1)).round(2),
         df["DMD_Real_Hist"],
     )
 
-    tem_historico_acum = bool((dias_disp_prev > 0).any())
-    df["DMD_Referencia"] = np.where(
-        usar_dmd_acumulada & tem_historico_acum,
-        df["DMD_Real_Acumulada"],
-        df["DMD_Real_Hist"],
-    )
+    if usar_dmd_acumulada and len(hist_acum) > 0:
+        df["DMD"] = df["DMD_Real_Acumulada"]
+    else:
+        df["DMD"] = df["DMD_Real_Hist"]
 
-    # 4. Giro Real baseado no Estoque Médio Diário reconstruído
+    # 4. Estoque Médio Diário Real e Giro de Estoque
+    df["Estoque_Medio"] = df["Estoque_Medio_Diario"]
     df["Giro_Estoque"] = np.where(
-        df["Estoque_Medio_Diario"] > 0,
-        (df["Total_Saidas"] / df["Estoque_Medio_Diario"]).round(2),
+        df["Estoque_Medio"] > 0,
+        (df["Total_Saidas"] / df["Estoque_Medio"]).round(2),
         0.0,
     )
 
-    # 5. Preço Médio de Venda, Custo Médio de Compra e Valor em Estoque
+    # 5. Cobertura Futura Real (em dias) e Data Estimada de Ruptura
+    df["Cobertura_Dias"] = np.where(
+        df["DMD"] > 0,
+        (df["Saldo_Calculado"].clip(lower=0) / df["DMD"]).round(1),
+        np.where(df["Saldo_Calculado"] > 0, 999.0, 0.0),
+    )
+    df["Dias_Sem_Giro"] = _calcular_dias_sem_giro(df, data_ref)
+
+    def _estimar_data_ruptura(row_r):
+        if row_r["Saldo_Calculado"] <= 0:
+            return "Em Ruptura Hoje"
+        if row_r["DMD"] <= 0:
+            return "Sem Demanda"
+        dias_rest = int(np.floor(row_r["Cobertura_Dias"]))
+        return (data_ref + pd.Timedelta(days=dias_rest)).strftime("%d/%m/%Y")
+
+    df["Previsao_Ruptura"] = df.apply(_estimar_data_ruptura, axis=1)
+
+    # 6. Preços, Custos, Valor em Estoque e Margens (Bruta e Líquida)
     df["Preco_Medio_Venda"] = np.where(
         df["Total_Saidas"] > 0,
         (df["Valor_Saidas"] / df["Total_Saidas"]).round(2),
@@ -265,41 +285,37 @@ def calcular_indicadores_estoque(
     )
     df["Valor_Estoque_Atual"] = (df["Saldo_Calculado"].clip(lower=0) * valor_unitario_ref).round(2)
 
-    # 6. Margem Bruta (via XML) e Margem Líquida Estimada (via % deduções/despesas)
-    taxa_deducao = max(float(pct_deducoes_liq), 0.0) / 100.0
-    df["Tem_Custo_XML"] = (df["Custo_Medio_Compra"] > 0) & (df["Valor_Saidas"] > 0)
+    df["Tem_Custo_XML"] = df["Custo_Medio_Compra"] > 0
     df["CMV_Vendido"] = np.where(
         df["Tem_Custo_XML"],
         (df["Total_Saidas"] * df["Custo_Medio_Compra"]).round(2),
         0.0,
     )
     df["Lucro_Bruto"] = np.where(
-        df["Tem_Custo_XML"],
+        df["Tem_Custo_XML"] & (df["Valor_Saidas"] > 0),
         (df["Valor_Saidas"] - df["CMV_Vendido"]).round(2),
         0.0,
     )
     df["Margem_Bruta_Pct"] = np.where(
-        df["Tem_Custo_XML"],
-        ((df["Lucro_Bruto"] / df["Valor_Saidas"]) * 100).round(1),
-        np.nan,
-    )
-    df["Deducoes_Operacionais"] = np.where(
-        df["Tem_Custo_XML"],
-        (df["Valor_Saidas"] * taxa_deducao).round(2),
-        0.0,
-    )
-    df["Lucro_Liquido_Est"] = np.where(
-        df["Tem_Custo_XML"],
-        (df["Lucro_Bruto"] - df["Deducoes_Operacionais"]).round(2),
-        0.0,
-    )
-    df["Margem_Liquida_Pct"] = np.where(
-        df["Tem_Custo_XML"],
-        ((df["Lucro_Liquido_Est"] / df["Valor_Saidas"]) * 100).round(1),
+        df["Tem_Custo_XML"] & (df["Valor_Saidas"] > 0),
+        ((df["Lucro_Bruto"] / df["Valor_Saidas"]) * 100).round(2),
         np.nan,
     )
 
-    # 7. Impacto da Ruptura Passada (O que deixou de ser vendido nos dias zerados do período)
+    fator_deducoes = float(pct_deducoes_despesas) / 100.0
+    df["Deducoes_Despesas_Est"] = (df["Valor_Saidas"] * fator_deducoes).round(2)
+    df["Lucro_Liquido_Est"] = np.where(
+        df["Tem_Custo_XML"] & (df["Valor_Saidas"] > 0),
+        (df["Lucro_Bruto"] - df["Deducoes_Despesas_Est"]).round(2),
+        0.0,
+    )
+    df["Margem_Liquida_Pct"] = np.where(
+        df["Tem_Custo_XML"] & (df["Valor_Saidas"] > 0),
+        ((df["Lucro_Liquido_Est"] / df["Valor_Saidas"]) * 100).round(2),
+        np.nan,
+    )
+
+    # 7. Ruptura Histórica (Passado - Regra Ouro) e Impacto Financeiro Perdido
     df["Unidades_Perdidas_Hist"] = np.where(
         (df["Dias_Ruptura_Hist"] > 0) & (df["DMD_Real_Hist"] > 0),
         np.ceil(df["DMD_Real_Hist"] * df["Dias_Ruptura_Hist"]),
@@ -308,21 +324,27 @@ def calcular_indicadores_estoque(
     df["Perda_Financeira_Hist"] = (
         df["Unidades_Perdidas_Hist"] * df["Preco_Medio_Venda"]
     ).round(2)
-    df["Lucro_Bruto_Perdido_Hist"] = np.where(
+
+    margem_unit_bruta = np.where(
         df["Tem_Custo_XML"],
-        (df["Unidades_Perdidas_Hist"] * (df["Preco_Medio_Venda"] - df["Custo_Medio_Compra"])).round(2),
+        (df["Preco_Medio_Venda"] - df["Custo_Medio_Compra"]).clip(lower=0.0),
         0.0,
     )
-    df["Perda_Diaria_Ruptura"] = np.where(
-        (df["Saldo_Calculado"] <= 0) & (df["DMD_Referencia"] > 0),
-        (df["DMD_Referencia"] * df["Preco_Medio_Venda"]).round(2),
+    df["Lucro_Bruto_Perdido_Hist"] = (
+        df["Unidades_Perdidas_Hist"] * margem_unit_bruta
+    ).round(2)
+
+    em_ruptura_hoje = df["Saldo_Calculado"] <= 0
+    df["Perda_Diaria_Futura"] = np.where(
+        em_ruptura_hoje & (df["DMD"] > 0),
+        (df["DMD"] * df["Preco_Medio_Venda"]).round(2),
         0.0,
     )
 
-    # 8. Curva ABC pela Receita Potencial (Faturamento Realizado + Venda Perdida por Ruptura)
-    df["Receita_Potencial_Hist"] = (df["Valor_Saidas"] + df["Perda_Financeira_Hist"]).round(2)
-    usar_financeiro = df["Receita_Potencial_Hist"].sum() > 0
-    criterio_abc = "Receita_Potencial_Hist" if usar_financeiro else "Total_Saidas"
+    # 8. Curva ABC Potencial (Faturamento Realizado + Venda Perdida Histórica)
+    df["Receita_Potencial"] = (df["Valor_Saidas"] + df["Perda_Financeira_Hist"]).round(2)
+    usar_financeiro = df["Receita_Potencial"].sum() > 0
+    criterio_abc = "Receita_Potencial" if usar_financeiro else "Total_Saidas"
 
     df = df.sort_values(by=criterio_abc, ascending=False).reset_index(drop=True)
     total_geral = df[criterio_abc].sum()
@@ -340,38 +362,7 @@ def calcular_indicadores_estoque(
         df["Acumulado_Pct"] = 0.0
         df["Curva_ABC"] = "C"
 
-    # 9. Projeção Futura: Cobertura (dias) e Data Estimada de Ruptura
-    df["Cobertura_Dias"] = np.where(
-        df["DMD_Referencia"] > 0,
-        (df["Saldo_Calculado"].clip(lower=0) / df["DMD_Referencia"]).round(1),
-        np.where(df["Saldo_Calculado"] > 0, 999.0, 0.0),
-    )
-
-    def _projetar_data_ruptura(row_item) -> str:
-        if row_item["Saldo_Calculado"] <= 0:
-            return "Já zerado"
-        if row_item["DMD_Referencia"] <= 0 or row_item["Cobertura_Dias"] >= 999.0:
-            return "Sem consumo"
-        dias_restantes = int(np.floor(row_item["Cobertura_Dias"]))
-        data_prev = data_ref + timedelta(days=dias_restantes)
-        return data_prev.strftime("%d/%m/%Y")
-
-    df["Previsao_Ruptura"] = df.apply(_projetar_data_ruptura, axis=1)
-    df["Dias_Sem_Giro"] = _calcular_dias_sem_giro(df, data_ref)
-
-    # 10. Cobertura Mínima e Cobertura Alvo aplicadas por Categoria
-    if regras_categoria:
-        df["Cob_Min_Aplicada"] = df["Categoria"].map(
-            lambda c: int(regras_categoria.get(c, {}).get("min", cobertura_minima))
-        )
-        df["Cob_Alvo_Aplicada"] = df["Categoria"].map(
-            lambda c: int(regras_categoria.get(c, {}).get("alvo", cobertura_alvo))
-        )
-    else:
-        df["Cob_Min_Aplicada"] = int(cobertura_minima)
-        df["Cob_Alvo_Aplicada"] = int(cobertura_alvo)
-
-    # 11. Diagnóstico Futuro + Sinalização de Ruptura Oculta no Passado
+    # 9. Diagnóstico Operacional (Presente + Passado)
     df["Status_Estoque"] = np.select(
         [
             df["Saldo_Calculado"] <= 0,
@@ -380,7 +371,7 @@ def calcular_indicadores_estoque(
             df["Cobertura_Dias"] == 999.0,
         ],
         [
-            "🔴 Ruptura Atual",
+            "🔴 Ruptura Hoje",
             "🟡 Atenção (Baixo)",
             "🔵 Excesso",
             "⚪ Sem Saída no Período",
@@ -388,67 +379,15 @@ def calcular_indicadores_estoque(
         default="🟢 Saudável",
     )
 
-    df["Historico_Ruptura_Tag"] = np.where(
-        df["Dias_Ruptura_Hist"] > 0,
-        df["Dias_Ruptura_Hist"].astype(int).astype(str) + "d zerado",
-        "100% disponível",
-    )
-
-    # 12. Sugestão de Compra baseada na Demanda Real
-    necessidade_bruta = (df["DMD_Referencia"] * df["Cob_Alvo_Aplicada"]) - df["Saldo_Calculado"]
+    # 10. Sugestão de Compra baseada na DMD Real
+    necessidade_bruta = (df["DMD"] * df["Cob_Alvo_Aplicada"]) - df["Saldo_Calculado"]
     df["Sugestao_Compra"] = np.where(
         necessidade_bruta > 0,
         np.ceil(necessidade_bruta),
         0.0,
     )
 
-    return df, df_kardex
-
-
-def _gerar_resumo_agrupado(df_filtrado: pd.DataFrame, coluna_grupo: str) -> pd.DataFrame:
-    """Agrupa os indicadores históricos, de margem e projeções futuras por Categoria ou Marca."""
-    if df_filtrado.empty or coluna_grupo not in df_filtrado.columns:
-        return pd.DataFrame()
-
-    registros = []
-    for grupo, g in df_filtrado.groupby(coluna_grupo, dropna=False):
-        fat_realizado = float(g["Valor_Saidas"].sum())
-        perda_hist = float(g["Perda_Financeira_Hist"].sum())
-        receita_pot = fat_realizado + perda_hist
-        capital_est = float(g["Valor_Estoque_Atual"].sum())
-
-        g_com_custo = g[g["Tem_Custo_XML"]]
-        fat_com_custo = float(g_com_custo["Valor_Saidas"].sum())
-        lucro_bruto = float(g_com_custo["Lucro_Bruto"].sum())
-        lucro_liq = float(g_com_custo["Lucro_Liquido_Est"].sum())
-        lucro_perdido = float(g_com_custo["Lucro_Bruto_Perdido_Hist"].sum())
-
-        margem_bruta_pct = round((lucro_bruto / fat_com_custo) * 100, 1) if fat_com_custo > 0 else np.nan
-        margem_liq_pct = round((lucro_liq / fat_com_custo) * 100, 1) if fat_com_custo > 0 else np.nan
-
-        registros.append(
-            {
-                coluna_grupo: grupo,
-                "Qtd_SKUs": int(len(g)),
-                "SKUs_Ruptura_Atual": int((g["Saldo_Calculado"] <= 0).sum()),
-                "SKUs_Faltaram_Passado": int((g["Dias_Ruptura_Hist"] > 0).sum()),
-                "Disponibilidade_Media_Pct": round(float(g["Disponibilidade_Pct"].mean()), 1),
-                "Faturamento_Realizado": round(fat_realizado, 2),
-                "Lucro_Bruto": round(lucro_bruto, 2),
-                "Margem_Bruta_Pct": margem_bruta_pct,
-                "Lucro_Liquido_Est": round(lucro_liq, 2),
-                "Margem_Liquida_Pct": margem_liq_pct,
-                "Venda_Perdida_Passado": round(perda_hist, 2),
-                "Lucro_Bruto_Perdido": round(lucro_perdido, 2),
-                "Receita_Potencial": round(receita_pot, 2),
-                "Capital_Estoque": round(capital_est, 2),
-                "Giro_Medio": round(float(g["Giro_Estoque"].mean()), 2),
-                "Sugestao_Compra_Un": int(g["Sugestao_Compra"].sum()),
-            }
-        )
-
-    resumo = pd.DataFrame(registros).sort_values(by="Receita_Potencial", ascending=False).reset_index(drop=True)
-    return resumo
+    return df, df_kardex_completo
 
 
 def _gerar_base_proximo_ciclo(
@@ -459,9 +398,9 @@ def _gerar_base_proximo_ciclo(
     dias_periodo: int,
     valor_estoque_total: float,
     qtd_ruptura: int,
-    perda_ruptura_hist: float,
+    perda_ruptura_total: float,
 ) -> pd.DataFrame:
-    """Monta a planilha estruturada para continuar a análise no próximo ciclo preservando o histórico."""
+    """Monta a planilha estruturada para continuar a análise no próximo ciclo."""
     colunas_preservar = [c for c in ["SKU", "Descrição", "Categoria", "Marca", "Fator_Conversao"] if c in df_ind.columns]
     df_next = df_ind[colunas_preservar].copy()
     df_next["Qtd Inicial"] = df_ind["Saldo_Calculado"].clip(lower=0.0)
@@ -475,17 +414,73 @@ def _gerar_base_proximo_ciclo(
     df_next["Ref_Fat_Medio_Diario"] = round(fat_medio_diario, 2)
     df_next["Ref_Capital"] = round(valor_estoque_total, 2)
     df_next["Ref_Ruptura_Qtd"] = int(qtd_ruptura)
-    df_next["Ref_Perda_Ruptura"] = round(perda_ruptura_hist, 2)
+    df_next["Ref_Perda_Ruptura"] = round(perda_ruptura_total, 2)
     return df_next
 
 
-def renderizar_aba_indicadores():
-    st.header("📊 Indicadores Históricos (Kardex) e Projeção de Ruptura")
-    st.caption(
-        "Reconstrução dia a dia do passado de cada SKU (identificando rupturas ocultas, demanda real e margens) para projetar o risco futuro."
+def _agrupar_por_dimensao(df_ind: pd.DataFrame, dimensao: str, pct_deducoes_despesas: float) -> pd.DataFrame:
+    """Consolida KPIs financeiros, de disponibilidade, ruptura histórica e margens por Categoria ou Marca."""
+    agrupado = (
+        df_ind.groupby(dimensao, as_index=False)
+        .agg(
+            Qtd_SKUs=("SKU", "count"),
+            SKUs_Ruptura_Hoje=("Saldo_Calculado", lambda s: int((s <= 0).sum())),
+            SKUs_Com_Ruptura_Hist=("Dias_Ruptura_Hist", lambda s: int((s > 0).sum())),
+            Disponibilidade_Media_Pct=("Disponibilidade_Pct", "mean"),
+            Dias_Zerado_Total=("Dias_Ruptura_Hist", "sum"),
+            Total_Saidas_Un=("Total_Saidas", "sum"),
+            Faturamento_RS=("Valor_Saidas", "sum"),
+            CMV_RS=("CMV_Vendido", "sum"),
+            Lucro_Bruto_RS=("Lucro_Bruto", "sum"),
+            Capital_Estoque_RS=("Valor_Estoque_Atual", "sum"),
+            Venda_Perdida_Hist_RS=("Perda_Financeira_Hist", "sum"),
+            Lucro_Bruto_Perdido_RS=("Lucro_Bruto_Perdido_Hist", "sum"),
+            Giro_Medio=("Giro_Estoque", "mean"),
+            Sugestao_Compra_Un=("Sugestao_Compra", "sum"),
+        )
+        .sort_values(by="Faturamento_RS", ascending=False)
+        .reset_index(drop=True)
     )
 
-    if "df_xml_consolidado" not in st.session_state or st.session_state["df_xml_consolidado"] is None or st.session_state["df_xml_consolidado"].empty:
+    fat_total_grupo = agrupado["Faturamento_RS"].sum()
+    agrupado["Participacao_Fat_Pct"] = np.where(
+        fat_total_grupo > 0,
+        ((agrupado["Faturamento_RS"] / fat_total_grupo) * 100).round(2),
+        0.0,
+    )
+    agrupado["Disponibilidade_Media_Pct"] = agrupado["Disponibilidade_Media_Pct"].round(1)
+    agrupado["Giro_Medio"] = agrupado["Giro_Medio"].round(2)
+
+    agrupado["Margem_Bruta_Pct"] = np.where(
+        (agrupado["Faturamento_RS"] > 0) & (agrupado["CMV_RS"] > 0),
+        ((agrupado["Lucro_Bruto_RS"] / agrupado["Faturamento_RS"]) * 100).round(2),
+        np.nan,
+    )
+    fator_ded = float(pct_deducoes_despesas) / 100.0
+    agrupado["Lucro_Liquido_Est_RS"] = np.where(
+        agrupado["CMV_RS"] > 0,
+        (agrupado["Lucro_Bruto_RS"] - (agrupado["Faturamento_RS"] * fator_ded)).round(2),
+        0.0,
+    )
+    agrupado["Margem_Liquida_Pct"] = np.where(
+        (agrupado["Faturamento_RS"] > 0) & (agrupado["CMV_RS"] > 0),
+        ((agrupado["Lucro_Liquido_Est_RS"] / agrupado["Faturamento_RS"]) * 100).round(2),
+        np.nan,
+    )
+    return agrupado
+
+
+def renderizar_aba_indicadores():
+    st.header("📊 Indicadores Históricos, Kardex Diário e Rentabilidade")
+    st.caption(
+        "Reconstrução dia a dia (Regra Ouro) para medir disponibilidade real, rupturas passadas, margem bruta/líquida e reposição."
+    )
+
+    if (
+        "df_xml_consolidado" not in st.session_state
+        or st.session_state["df_xml_consolidado"] is None
+        or st.session_state["df_xml_consolidado"].empty
+    ):
         st.info(
             "Nenhum dado consolidado encontrado. Processe os arquivos XML na **Etapa 2** primeiro."
         )
@@ -493,10 +488,21 @@ def renderizar_aba_indicadores():
 
     df_consolidado = st.session_state["df_xml_consolidado"]
     df_movs = st.session_state.get("df_movs_detalhadas", pd.DataFrame())
+
     snap = st.session_state.get("ponto_partida")
     tem_comparacao = snap is not None
+    historico_acumulado = {}
+    if tem_comparacao and "df_base_proximo_ciclo" in snap:
+        df_ref = snap["df_base_proximo_ciclo"]
+        if "SKU" in df_ref.columns and "Saidas_Acum_Ref" in df_ref.columns:
+            for r in df_ref.itertuples(index=False):
+                sku_k = str(getattr(r, "SKU")).strip()
+                historico_acumulado[sku_k] = {
+                    "saidas_acum": float(getattr(r, "Saidas_Acum_Ref", 0.0) or 0.0),
+                    "dias_disp_acum": float(getattr(r, "Dias_Disp_Acum_Ref", 0.0) or 0.0),
+                }
 
-    # 1. Parâmetros da Simulação + Regras por Categoria
+    # 1. Parâmetros de Simulação
     with st.container(border=True):
         st.subheader("Parâmetros da Simulação")
         p1, p2, p3, p4, p5 = st.columns(5)
@@ -505,21 +511,21 @@ def renderizar_aba_indicadores():
             min_value=1,
             max_value=365,
             value=30,
-            help="Quantidade de dias corridos coberta pelos XMLs importados.",
+            help="Quantidade de dias corridos da janela analisada.",
         )
         cobertura_minima = p2.number_input(
             "Cob. mínima padrão (dias)",
             min_value=1,
             max_value=90,
             value=7,
-            help="Padrão global de alerta. Pode ser personalizado por categoria abaixo.",
+            help="Valor padrão de alerta caso a categoria não tenha regra própria.",
         )
         cobertura_alvo = p3.number_input(
             "Cob. alvo padrão (dias)",
             min_value=1,
             max_value=180,
             value=15,
-            help="Padrão global de compra. Pode ser personalizado por categoria abaixo.",
+            help="Valor padrão de compra caso a categoria não tenha regra própria.",
         )
         dias_excesso = p4.number_input(
             "Limite excesso (dias)",
@@ -528,112 +534,112 @@ def renderizar_aba_indicadores():
             value=45,
             help="Acima deste limite o estoque é considerado excessivo.",
         )
-        pct_deducoes_liq = p5.number_input(
+        pct_deducoes_despesas = p5.number_input(
             "Impostos + Despesas (%)",
             min_value=0.0,
-            max_value=90.0,
+            max_value=95.0,
             value=15.0,
-            step=1.0,
-            help="Percentual sobre o faturamento (impostos, taxas de cartão e despesas operacionais) para estimar a Margem Líquida.",
+            step=0.5,
+            help="Percentual estimado de impostos sobre venda, taxas de cartão e despesas operacionais para cálculo da Margem Líquida.",
         )
 
         usar_dmd_acumulada = True
-        if tem_comparacao:
+        if len(historico_acumulado) > 0:
             usar_dmd_acumulada = st.checkbox(
-                "Usar DMD Real Acumulada (recomendado quando os lotes têm durações diferentes, ex: 8d -> 4d -> 5d)",
+                "Usar DMD Real Acumulada (histórico somado dos ciclos) para Cobertura Futura e Sugestão de Compra",
                 value=True,
+                help="Recomendado ao importar lotes curtos/irregulares (ex: 8d -> 4d -> 5d).",
             )
 
-        if "Categoria" in df_consolidado.columns:
-            cats_serie = df_consolidado["Categoria"].fillna("Geral").astype(str).str.strip().replace("", "Geral")
-        else:
-            cats_serie = pd.Series(["Geral"])
-        categorias_unicas = sorted(cats_serie.unique().tolist())
-
+        # Configuração de Cobertura Mínima e Cobertura Alvo por Categoria
+        categorias_disponiveis = sorted(
+            df_consolidado["Categoria"].fillna("Geral").astype(str).str.strip().replace("", "Geral").unique().tolist()
+            if "Categoria" in df_consolidado.columns
+            else ["Geral"]
+        )
         regras_categoria = {}
-        with st.expander("⚙️ Configurar Cobertura Mínima e Cobertura Alvo por Categoria (opcional)", expanded=False):
+        with st.expander("⚙️ Configurar Cobertura Mínima e Cobertura Alvo por Categoria", expanded=False):
             st.caption(
-                "Personalize os dias de **Cobertura Mínima (Alerta)** e **Cobertura Alvo (Compra)** para cada categoria conforme o prazo de entrega dos fornecedores."
+                "Personalize os dias de **Cobertura Mínima (alerta)** e **Cobertura Alvo (compra)** por categoria. "
+                "Categorias não alteradas seguem os valores padrão acima."
             )
-            df_regras_cat = pd.DataFrame(
+            df_cfg_cat = pd.DataFrame(
                 {
-                    "Categoria": categorias_unicas,
-                    "Cobertura Mínima / Alerta (dias)": [int(cobertura_minima)] * len(categorias_unicas),
-                    "Cobertura Alvo Compra (dias)": [int(cobertura_alvo)] * len(categorias_unicas),
+                    "Categoria": categorias_disponiveis,
+                    "Cobertura Mínima / Alerta (dias)": [int(cobertura_minima)] * len(categorias_disponiveis),
+                    "Cobertura Alvo Compra (dias)": [int(cobertura_alvo)] * len(categorias_disponiveis),
                 }
             )
-            df_regras_editado = st.data_editor(
-                df_regras_cat,
+            df_cfg_editado = st.data_editor(
+                df_cfg_cat,
                 disabled=["Categoria"],
                 column_config={
                     "Categoria": st.column_config.TextColumn("Categoria"),
                     "Cobertura Mínima / Alerta (dias)": st.column_config.NumberColumn(
-                        "Cobertura Mínima / Alerta (dias)",
+                        "Cob. Mínima / Alerta (dias)",
                         min_value=1,
                         max_value=180,
                         step=1,
-                        format="%d d",
                     ),
                     "Cobertura Alvo Compra (dias)": st.column_config.NumberColumn(
-                        "Cobertura Alvo Compra (dias)",
+                        "Cob. Alvo Compra (dias)",
                         min_value=1,
                         max_value=365,
                         step=1,
-                        format="%d d",
                     ),
                 },
                 use_container_width=True,
                 hide_index=True,
                 key="editor_cobertura_categoria",
             )
-            for _, row_cat in df_regras_editado.iterrows():
-                val_min = row_cat["Cobertura Mínima / Alerta (dias)"]
-                val_alvo = row_cat["Cobertura Alvo Compra (dias)"]
-                regras_categoria[str(row_cat["Categoria"])] = {
-                    "min": int(val_min) if pd.notna(val_min) else int(cobertura_minima),
-                    "alvo": int(val_alvo) if pd.notna(val_alvo) else int(cobertura_alvo),
+            for r_cat in df_cfg_editado.itertuples(index=False):
+                regras_categoria[str(r_cat[0])] = {
+                    "cob_min": int(r_cat[1]),
+                    "cob_alvo": int(r_cat[2]),
                 }
 
-    df_ind, df_kardex = calcular_indicadores_estoque(
+    df_ind, df_kardex_completo = calcular_indicadores_estoque(
         df_consolidado=df_consolidado,
         df_movs=df_movs,
         dias_periodo=int(dias_periodo),
         cobertura_minima=int(cobertura_minima),
         cobertura_alvo=int(cobertura_alvo),
         dias_excesso=int(dias_excesso),
-        pct_deducoes_liq=float(pct_deducoes_liq),
         regras_categoria=regras_categoria,
-        snap_anterior=snap,
+        historico_acumulado=historico_acumulado,
         usar_dmd_acumulada=usar_dmd_acumulada,
+        pct_deducoes_despesas=float(pct_deducoes_despesas),
     )
 
-    dias_reais_kardex = int(df_ind["Dias_Janela_Hist"].max()) if not df_ind.empty else max(int(dias_periodo), 1)
     faturamento_total = float(df_ind["Valor_Saidas"].sum())
-    fat_medio_diario = faturamento_total / max(dias_reais_kardex, 1)
+    fat_medio_diario = faturamento_total / max(int(dias_periodo), 1)
     valor_estoque_total = float(df_ind["Valor_Estoque_Atual"].sum())
-    qtd_ruptura_atual = int((df_ind["Saldo_Calculado"] <= 0).sum())
-    qtd_ruptura_passado = int((df_ind["Dias_Ruptura_Hist"] > 0).sum())
-    perda_ruptura_hist = float(df_ind["Perda_Financeira_Hist"].sum())
+    qtd_ruptura_hoje = int((df_ind["Saldo_Calculado"] <= 0).sum())
+    qtd_ruptura_hist = int((df_ind["Dias_Ruptura_Hist"] > 0).sum())
+    perda_ruptura_hist_total = float(df_ind["Perda_Financeira_Hist"].sum())
+    lucro_bruto_perdido_total = float(df_ind["Lucro_Bruto_Perdido_Hist"].sum())
     disponibilidade_media = float(df_ind["Disponibilidade_Pct"].mean()) if not df_ind.empty else 100.0
     total_sugerido = int(df_ind["Sugestao_Compra"].sum())
 
-    # Cálculo das margens consolidadas (considerando itens com custo de compra identificado nos XMLs)
-    df_com_custo = df_ind[df_ind["Tem_Custo_XML"]]
-    fat_com_custo = float(df_com_custo["Valor_Saidas"].sum())
+    # Cálculo consolidado de Margem Bruta e Líquida
+    df_com_custo = df_ind[df_ind["Tem_Custo_XML"] & (df_ind["Valor_Saidas"] > 0)]
+    fat_base_margem = float(df_com_custo["Valor_Saidas"].sum())
     lucro_bruto_total = float(df_com_custo["Lucro_Bruto"].sum())
-    lucro_liq_total = float(df_com_custo["Lucro_Liquido_Est"].sum())
-    margem_bruta_geral = (lucro_bruto_total / fat_com_custo) * 100 if fat_com_custo > 0 else None
-    margem_liq_geral = (lucro_liq_total / fat_com_custo) * 100 if fat_com_custo > 0 else None
+    lucro_liquido_total = float(df_com_custo["Lucro_Liquido_Est"].sum())
+    margem_bruta_geral = (lucro_bruto_total / fat_base_margem * 100) if fat_base_margem > 0 else np.nan
+    margem_liquida_geral = (lucro_liquido_total / fat_base_margem * 100) if fat_base_margem > 0 else np.nan
 
-    # 2. Cards de Resumo Executivo (Histórico + Rentabilidade + Projeção)
-    st.subheader("Resumo Executivo (Passado Reconstruído & Projeção)")
+    # 2. Cards de Resumo Executivo
+    st.subheader("Resumo Executivo (Histórico + Projeção)")
     if tem_comparacao:
-        dias_p1 = int(snap.get("dias_periodo", dias_reais_kardex))
+        dias_p1 = int(snap.get("dias_periodo", 0) or 0)
+        info_p1 = f" ({dias_p1}d)" if dias_p1 > 0 else ""
         st.caption(
-            f"📈 Kardex reconstruído em **{dias_reais_kardex} dia(s)** | Comparando contra **Ponto de Partida** de **{snap['data_registro']}** ({dias_p1} dia(s))."
+            f"📈 Comparando lote atual (**{int(dias_periodo)}d**) contra o **Ponto de Partida** salvo em **{snap['data_registro']}**{info_p1}."
         )
-    else:
-        st.caption(f"📅 Linha do tempo reconstruída em **{dias_reais_kardex} dia(s)** a partir dos XMLs.")
+
+    m1, m2, m3, m4 = st.columns(4)
+    m5, m6, m7, m8 = st.columns(4)
 
     delta_fat_dia = None
     delta_cap = None
@@ -641,69 +647,72 @@ def renderizar_aba_indicadores():
     delta_rup_val = None
 
     if tem_comparacao:
-        fat_dia_p1 = float(snap.get("fat_medio_diario", 0.0))
-        if fat_dia_p1 <= 0 and float(snap.get("faturamento_total", 0.0)) > 0:
-            fat_dia_p1 = float(snap.get("faturamento_total", 0.0)) / max(int(snap.get("dias_periodo", dias_reais_kardex)), 1)
+        fat_dia_p1 = float(snap.get("fat_medio_diario", 0.0) or 0.0)
+        if fat_dia_p1 == 0.0 and int(snap.get("dias_periodo", 0) or 0) > 0:
+            fat_dia_p1 = float(snap.get("faturamento_total", 0.0)) / int(snap["dias_periodo"])
 
-        diff_fat_dia = fat_medio_diario - fat_dia_p1
+        if fat_dia_p1 > 0:
+            diff_fat_dia = fat_medio_diario - fat_dia_p1
+            delta_fat_dia = f"{_formatar_brl(diff_fat_dia)}/dia vs. P1"
+
         diff_cap = valor_estoque_total - float(snap.get("valor_estoque_total", 0.0))
-        diff_rup_qtd = qtd_ruptura_atual - int(snap.get("qtd_ruptura", 0))
-        diff_rup_val = perda_ruptura_hist - float(snap.get("perda_ruptura_total", 0.0))
+        diff_rup_qtd = qtd_ruptura_hoje - int(snap.get("qtd_ruptura", 0))
+        diff_rup_val = perda_ruptura_hist_total - float(snap.get("perda_ruptura_total", 0.0))
 
-        delta_fat_dia = f"{_formatar_brl(diff_fat_dia)}/dia vs. P1"
         delta_cap = f"{_formatar_brl(diff_cap)} vs. P1"
         delta_rup_qtd = f"{diff_rup_qtd:+d} SKU(s) vs. P1"
         delta_rup_val = f"{_formatar_brl(diff_rup_val)} vs. P1"
 
-    m1, m2, m3, m4 = st.columns(4)
     m1.metric(
-        "Faturamento Médio / Dia",
-        f"{_formatar_brl(fat_medio_diario)}/dia",
-        delta=delta_fat_dia if tem_comparacao else f"Total: {_formatar_brl(faturamento_total)}",
-        delta_color="normal" if tem_comparacao else "off",
-    )
-    m2.metric(
-        "Margem Bruta (XML)",
-        _formatar_pct(margem_bruta_geral),
-        delta=f"Lucro Bruto: {_formatar_brl(lucro_bruto_total)}" if margem_bruta_geral is not None else "Importe XML de compra",
-        delta_color="normal" if margem_bruta_geral is not None else "off",
-        help="Calculada comparando o preço de venda (NF saída) com o custo médio de compra (NF entrada).",
-    )
-    m3.metric(
-        "Margem Líquida Est.",
-        _formatar_pct(margem_liq_geral),
-        delta=f"Lucro Líq.: {_formatar_brl(lucro_liq_total)}" if margem_liq_geral is not None else f"Deduções: {pct_deducoes_liq:.1f}%",
-        delta_color="normal" if margem_liq_geral is not None else "off",
-        help=f"Margem Bruta descontada de {pct_deducoes_liq:.1f}% de impostos e despesas operacionais.",
-    )
-    m4.metric(
-        "Capital em Estoque",
-        _formatar_brl(valor_estoque_total),
-        delta=delta_cap,
+        "Faturamento do Lote",
+        _formatar_brl(faturamento_total),
+        delta=f"Média: {_formatar_brl(fat_medio_diario)}/dia",
         delta_color="off",
     )
+    m2.metric(
+        "Faturamento Médio Diário",
+        f"{_formatar_brl(fat_medio_diario)}/dia",
+        delta=delta_fat_dia,
+        delta_color="normal",
+    )
+    m3.metric(
+        "Margem Bruta (XML)",
+        f"{margem_bruta_geral:.1f}%" if pd.notna(margem_bruta_geral) else "Sem custo XML",
+        delta=f"Lucro Bruto: {_formatar_brl(lucro_bruto_total)}" if pd.notna(margem_bruta_geral) else None,
+        delta_color="normal",
+    )
+    m4.metric(
+        "Margem Líquida Est.",
+        f"{margem_liquida_geral:.1f}%" if pd.notna(margem_liquida_geral) else "Sem custo XML",
+        delta=f"Lucro Líq.: {_formatar_brl(lucro_liquido_total)}" if pd.notna(margem_liquida_geral) else None,
+        delta_color="normal",
+    )
 
-    m5, m6, m7, m8 = st.columns(4)
     m5.metric(
-        "Disponibilidade Gôndola",
+        "Disponibilidade na Gôndola",
         f"{disponibilidade_media:.1f}%",
-        delta=f"{qtd_ruptura_passado} SKU(s) faltaram no período",
-        delta_color="inverse" if qtd_ruptura_passado > 0 else "off",
+        delta=f"{qtd_ruptura_hist} SKU(s) faltaram no período",
+        delta_color="inverse" if qtd_ruptura_hist > 0 else "off",
     )
     m6.metric(
         "Venda Perdida (Passado)",
-        _formatar_brl(perda_ruptura_hist),
-        delta=delta_rup_val if tem_comparacao else None,
+        _formatar_brl(perda_ruptura_hist_total),
+        delta=delta_rup_val if tem_comparacao else (f"Margem Perdida: {_formatar_brl(lucro_bruto_perdido_total)}" if lucro_bruto_perdido_total > 0 else None),
         delta_color="inverse",
-        help="Faturamento perdido nos dias em que os produtos ficaram zerados dentro do período analisado.",
+        help="Estimativa de vendas deixadas na mesa nos dias em que a prateleira ficou vazia sem nenhuma saída (Regra Ouro).",
     )
     m7.metric(
-        "Ruptura Hoje (Fim Período)",
-        f"{qtd_ruptura_atual} SKU(s)",
+        "Ruptura Hoje (Zerados)",
+        f"{qtd_ruptura_hoje} SKU(s)",
         delta=delta_rup_qtd,
         delta_color="inverse",
     )
-    m8.metric("Sugestão Compra (Futura)", f"{total_sugerido} un.")
+    m8.metric(
+        "Capital Estoque / Compra",
+        _formatar_brl(valor_estoque_total),
+        delta=delta_cap if tem_comparacao else f"Sugestão compra: {total_sugerido} un.",
+        delta_color="off",
+    )
 
     # 3. Controle de Ciclos: Salvar Ponto de Partida
     with st.expander("📌 Ponto de Partida (Salvar Snapshot para Comparar Próximos Ciclos)", expanded=False):
@@ -718,27 +727,27 @@ def renderizar_aba_indicadores():
             data_registro=data_agora,
             faturamento_total=faturamento_total,
             fat_medio_diario=fat_medio_diario,
-            dias_periodo=dias_reais_kardex,
+            dias_periodo=int(dias_periodo),
             valor_estoque_total=valor_estoque_total,
-            qtd_ruptura=qtd_ruptura_atual,
-            perda_ruptura_hist=perda_ruptura_hist,
+            qtd_ruptura=qtd_ruptura_hoje,
+            perda_ruptura_total=perda_ruptura_hist_total,
         )
 
         if c_snap1.button("💾 Salvar Estado Atual como Ponto de Partida", type="secondary", use_container_width=True):
             st.session_state["ponto_partida"] = {
                 "data_registro": data_agora,
-                "dias_periodo": dias_reais_kardex,
+                "dias_periodo": int(dias_periodo),
                 "faturamento_total": faturamento_total,
                 "fat_medio_diario": fat_medio_diario,
                 "valor_estoque_total": valor_estoque_total,
-                "qtd_ruptura": qtd_ruptura_atual,
-                "perda_ruptura_total": perda_ruptura_hist,
+                "qtd_ruptura": qtd_ruptura_hoje,
+                "perda_ruptura_total": perda_ruptura_hist_total,
                 "df_base_proximo_ciclo": df_next_cycle,
                 "df_indicadores_ref": df_ind.copy(),
             }
             st.success(
                 f"✅ Ponto de Partida salvo ({data_agora})! Volte na **Etapa 2** e selecione "
-                "'Continuar do Ponto de Partida salvo' quando quiser processar os próximos XMLs."
+                "'Continuar do Ponto de Partida salvo' para processar os próximos XMLs."
             )
             st.rerun()
 
@@ -752,17 +761,17 @@ def renderizar_aba_indicadores():
             use_container_width=True,
         )
 
-    # 4. Painel Dedicado: Ruptura Histórica (Passado) & Risco Futuro
+    # 4. Painel de Auditoria de Ruptura (Passada + Risco Futuro)
     df_criticos = df_ind[
         (df_ind["Dias_Ruptura_Hist"] > 0)
-        | (df_ind["Status_Estoque"].isin(["🔴 Ruptura Atual", "🟡 Atenção (Baixo)"]))
+        | (df_ind["Status_Estoque"].isin(["🔴 Ruptura Hoje", "🟡 Atenção (Baixo)"]))
     ].sort_values(by=["Perda_Financeira_Hist", "Valor_Saidas"], ascending=False)
 
     if not df_criticos.empty:
         with st.container(border=True):
-            st.subheader(f"🚨 Auditoria de Ruptura (Passado Oculto + Risco Futuro) — {len(df_criticos)} item(ns)")
+            st.subheader(f"🚨 Auditoria de Rupturas Passadas e Risco Futuro ({len(df_criticos)} item(ns))")
             st.caption(
-                "Inclui tanto itens que **sofreram falta no meio do período** (mesmo já repostos hoje) quanto produtos em **risco futuro iminente**."
+                "Inclui itens que sofreram falta no meio do período (mesmo já reabastecidos) e itens com risco iminente de ruptura."
             )
             cols_ruptura = [
                 c
@@ -773,14 +782,14 @@ def renderizar_aba_indicadores():
                     "Marca",
                     "Curva_ABC",
                     "Status_Estoque",
-                    "Previsao_Ruptura",
-                    "Dias_Ruptura_Hist",
                     "Disponibilidade_Pct",
+                    "Dias_Ruptura_Hist",
+                    "Episodios_Ruptura",
                     "DMD_Real_Hist",
-                    "Margem_Bruta_Pct",
                     "Perda_Financeira_Hist",
                     "Lucro_Bruto_Perdido_Hist",
                     "Saldo_Calculado",
+                    "Previsao_Ruptura",
                     "Sugestao_Compra",
                 ]
                 if c in df_criticos.columns
@@ -790,14 +799,14 @@ def renderizar_aba_indicadores():
                     columns={
                         "Curva_ABC": "Curva",
                         "Status_Estoque": "Situação Hoje",
-                        "Previsao_Ruptura": "Previsão Ruptura",
-                        "Dias_Ruptura_Hist": "Dias Zerado (Passado)",
                         "Disponibilidade_Pct": "Disponib. (%)",
+                        "Dias_Ruptura_Hist": "Dias Zerado (Passado)",
+                        "Episodios_Ruptura": "Vezes Zerado",
                         "DMD_Real_Hist": "DMD Real",
-                        "Margem_Bruta_Pct": "Margem Bruta (%)",
                         "Perda_Financeira_Hist": "Venda Perdida Passado (R\$)",
                         "Lucro_Bruto_Perdido_Hist": "Lucro Bruto Perdido (R\$)",
                         "Saldo_Calculado": "Saldo Hoje",
+                        "Previsao_Ruptura": "Previsão Ruptura",
                         "Sugestao_Compra": "Comprar Agora (un.)",
                     }
                 ),
@@ -807,55 +816,15 @@ def renderizar_aba_indicadores():
 
             csv_compra_urgente = df_criticos[cols_ruptura].to_csv(index=False, sep=";").encode("utf-8-sig")
             st.download_button(
-                label="🛒 Baixar Lista de Ruptura Histórica e Reposição (.CSV)",
+                label="🛒 Baixar Auditoria de Ruptura e Compra Urgente (.CSV)",
                 data=csv_compra_urgente,
-                file_name=f"auditoria_ruptura_reposicao_{datetime.now().strftime('%Y-%m-%d_%H-%M')}.csv",
+                file_name=f"auditoria_ruptura_compra_{datetime.now().strftime('%Y-%m-%d_%H-%M')}.csv",
                 mime="text/csv",
                 use_container_width=True,
             )
 
-    # 5. Filtros Rápidos Globais para as Abas de Análise
-    st.subheader("Análise Detalhada e Consolidações")
-    f1, f2, f3, f4 = st.columns(4)
-    filtro_curva = f1.multiselect(
-        "Curva ABC (Potencial):",
-        options=["A", "B", "C"],
-        default=["A", "B", "C"],
-    )
-    filtro_status = f2.multiselect(
-        "Situação Futura / Hoje:",
-        options=sorted(df_ind["Status_Estoque"].unique().tolist()),
-        default=sorted(df_ind["Status_Estoque"].unique().tolist()),
-    )
-    opcoes_cat = sorted(df_ind["Categoria"].unique().tolist())
-    filtro_categoria = f3.multiselect(
-        "Categoria:",
-        options=opcoes_cat,
-        default=opcoes_cat,
-    )
-    opcoes_marca = sorted(df_ind["Marca"].unique().tolist())
-    filtro_marca = f4.multiselect(
-        "Marca:",
-        options=opcoes_marca,
-        default=opcoes_marca,
-    )
-
-    df_filtrado = df_ind[
-        df_ind["Curva_ABC"].isin(filtro_curva)
-        & df_ind["Status_Estoque"].isin(filtro_status)
-        & df_ind["Categoria"].isin(filtro_categoria)
-        & df_ind["Marca"].isin(filtro_marca)
-    ].copy()
-
-    # Adiciona comparação por SKU quando existir Ponto de Partida
-    if tem_comparacao and "df_base_proximo_ciclo" in snap:
-        df_ref = snap["df_base_proximo_ciclo"]
-        if "SKU" in df_ref.columns and "Saldo_Anterior_Ref" in df_ref.columns:
-            mapa_saldo_ant = dict(zip(df_ref["SKU"].astype(str), pd.to_numeric(df_ref["Saldo_Anterior_Ref"], errors="coerce").fillna(0.0)))
-            df_filtrado["Var_Saldo"] = df_filtrado["SKU"].astype(str).map(mapa_saldo_ant)
-            df_filtrado["Var_Saldo"] = (df_filtrado["Saldo_Calculado"] - df_filtrado["Var_Saldo"]).round(2)
-
-    tab_sku, tab_kardex, tab_agrupado, tab_graficos = st.tabs(
+    # 5. Sub-abas de Análise Detalhada
+    tab_sku, tab_kardex, tab_agrupado, tab_evolucao = st.tabs(
         [
             "📦 Detalhamento por SKU",
             "🔍 Inspetor de Extrato Diário (Kardex)",
@@ -866,11 +835,60 @@ def renderizar_aba_indicadores():
 
     # --- SUB-ABA 1: DETALHAMENTO POR SKU ---
     with tab_sku:
+        f1, f2, f3, f4 = st.columns(4)
+        filtro_curva = f1.multiselect(
+            "Curva ABC (Potencial):",
+            options=["A", "B", "C"],
+            default=["A", "B", "C"],
+        )
+        filtro_status = f2.multiselect(
+            "Status Hoje:",
+            options=sorted(df_ind["Status_Estoque"].unique().tolist()),
+            default=sorted(df_ind["Status_Estoque"].unique().tolist()),
+        )
+        opcoes_cat = sorted(df_ind["Categoria"].unique().tolist())
+        filtro_categoria = f3.multiselect(
+            "Categoria:",
+            options=opcoes_cat,
+            default=opcoes_cat,
+        )
+        opcoes_marca = sorted(df_ind["Marca"].unique().tolist())
+        filtro_marca = f4.multiselect(
+            "Marca:",
+            options=opcoes_marca,
+            default=opcoes_marca,
+        )
+
+        df_filtrado = df_ind[
+            df_ind["Curva_ABC"].isin(filtro_curva)
+            & df_ind["Status_Estoque"].isin(filtro_status)
+            & df_ind["Categoria"].isin(filtro_categoria)
+            & df_ind["Marca"].isin(filtro_marca)
+        ].copy()
+
+        if tem_comparacao and "df_base_proximo_ciclo" in snap:
+            df_ref = snap["df_base_proximo_ciclo"]
+            if "SKU" in df_ref.columns and "Saldo_Anterior_Ref" in df_ref.columns:
+                mapa_saldo_ant = dict(
+                    zip(
+                        df_ref["SKU"].astype(str),
+                        pd.to_numeric(df_ref["Saldo_Anterior_Ref"], errors="coerce").fillna(0.0),
+                    )
+                )
+                df_filtrado["Var_Saldo"] = df_filtrado["SKU"].astype(str).map(mapa_saldo_ant)
+                df_filtrado["Var_Saldo"] = (df_filtrado["Saldo_Calculado"] - df_filtrado["Var_Saldo"]).round(2)
+
         df_exibicao = df_filtrado.copy()
         df_exibicao["Cobertura_Exibicao"] = np.where(
             df_exibicao["Cobertura_Dias"] >= 999.0,
-            f"Sem giro (>{dias_reais_kardex}d)",
+            "Sem demanda",
             df_exibicao["Cobertura_Dias"].astype(str) + " d",
+        )
+        df_exibicao["Margem_Bruta_Exib"] = df_exibicao["Margem_Bruta_Pct"].apply(
+            lambda x: f"{x:.1f}%" if pd.notna(x) else "Sem custo"
+        )
+        df_exibicao["Margem_Liq_Exib"] = df_exibicao["Margem_Liquida_Pct"].apply(
+            lambda x: f"{x:.1f}%" if pd.notna(x) else "Sem custo"
         )
 
         colunas_ordenadas = [
@@ -880,55 +898,52 @@ def renderizar_aba_indicadores():
             "Marca",
             "Curva_ABC",
             "Status_Estoque",
-            "Previsao_Ruptura",
+            "Disponibilidade_Pct",
+            "Dias_Ruptura_Hist",
+            "Perda_Financeira_Hist",
             "Saldo_Calculado",
             "Var_Saldo",
-            "Dias_Ruptura_Hist",
-            "Disponibilidade_Pct",
-            "DMD_Real_Hist",
-            "DMD_Real_Acumulada",
-            "DMD_Bruta_Lote",
-            "Cobertura_Exibicao",
-            "Cob_Min_Aplicada",
-            "Cob_Alvo_Aplicada",
             "Total_Saidas",
             "Valor_Saidas",
             "Lucro_Bruto",
-            "Margem_Bruta_Pct",
+            "Margem_Bruta_Exib",
             "Lucro_Liquido_Est",
-            "Margem_Liquida_Pct",
-            "Perda_Financeira_Hist",
+            "Margem_Liq_Exib",
+            "DMD_Real_Hist",
+            "DMD_Real_Acumulada",
+            "DMD_Bruta_Lote",
+            "Cob_Min_Aplicada",
+            "Cob_Alvo_Aplicada",
+            "Cobertura_Exibicao",
+            "Previsao_Ruptura",
             "Giro_Estoque",
             "Sugestao_Compra",
         ]
-        if not tem_comparacao and "DMD_Real_Acumulada" in colunas_ordenadas:
-            colunas_ordenadas.remove("DMD_Real_Acumulada")
-
         colunas_presentes = [c for c in colunas_ordenadas if c in df_exibicao.columns]
 
         st.dataframe(
             df_exibicao[colunas_presentes].rename(
                 columns={
                     "Curva_ABC": "Curva ABC",
-                    "Status_Estoque": "Situação Hoje",
-                    "Previsao_Ruptura": "Previsão Ruptura",
+                    "Status_Estoque": "Status Hoje",
+                    "Disponibilidade_Pct": "Disponib. (%)",
+                    "Dias_Ruptura_Hist": "Dias Zerado (Passado)",
+                    "Perda_Financeira_Hist": "Venda Perdida Hist. (R\$)",
                     "Saldo_Calculado": "Saldo Hoje",
                     "Var_Saldo": "Var. Saldo (vs P1)",
-                    "Dias_Ruptura_Hist": "Dias Zerado (Passado)",
-                    "Disponibilidade_Pct": "Disponib. (%)",
-                    "DMD_Real_Hist": "DMD Real",
-                    "DMD_Real_Acumulada": "DMD Real Acum.",
-                    "DMD_Bruta_Lote": "DMD Bruta",
-                    "Cobertura_Exibicao": "Cobertura Futura",
-                    "Cob_Min_Aplicada": "Cob. Mín. (d)",
-                    "Cob_Alvo_Aplicada": "Cob. Alvo (d)",
                     "Total_Saidas": "Saídas (Qtd)",
                     "Valor_Saidas": "Faturamento (R\$)",
                     "Lucro_Bruto": "Lucro Bruto (R\$)",
-                    "Margem_Bruta_Pct": "Margem Bruta (%)",
+                    "Margem_Bruta_Exib": "Margem Bruta",
                     "Lucro_Liquido_Est": "Lucro Líq. Est. (R\$)",
-                    "Margem_Liquida_Pct": "Margem Líq. (%)",
-                    "Perda_Financeira_Hist": "Venda Perdida Passado (R\$)",
+                    "Margem_Liq_Exib": "Margem Líq. Est.",
+                    "DMD_Real_Hist": "DMD Real",
+                    "DMD_Real_Acumulada": "DMD Real Acum.",
+                    "DMD_Bruta_Lote": "DMD Bruta",
+                    "Cob_Min_Aplicada": "Cob. Mín. (d)",
+                    "Cob_Alvo_Aplicada": "Cob. Alvo (d)",
+                    "Cobertura_Exibicao": "Cobertura Futura",
+                    "Previsao_Ruptura": "Previsão Ruptura",
                     "Giro_Estoque": "Giro Real",
                     "Sugestao_Compra": "Sugestão Compra",
                 }
@@ -942,7 +957,7 @@ def renderizar_aba_indicadores():
         st.download_button(
             label="📥 Baixar Relatório Completo de Indicadores por SKU (.CSV)",
             data=csv_indicadores,
-            file_name=f"indicadores_kardex_sku_{data_hoje}.csv",
+            file_name=f"indicadores_estoque_historico_{data_hoje}.csv",
             mime="text/csv",
             type="primary",
             use_container_width=True,
@@ -950,39 +965,46 @@ def renderizar_aba_indicadores():
 
     # --- SUB-ABA 2: INSPETOR DE EXTRATO DIÁRIO (KARDEX) ---
     with tab_kardex:
-        st.markdown("#### Auditoria Dia a Dia por Produto")
+        st.subheader("Inspetor de Extrato Diário (Kardex por SKU)")
         st.caption(
-            "Selecione um SKU para visualizar exatamente em quais datas o saldo zerou, quando entraram notas de compra e como foi o ritmo diário de vendas."
+            "Auditoria dia a dia pela Regra Ouro: o dia em que a última unidade é vendida conta como disponível; "
+            "apenas dias seguintes com prateleira vazia e sem saída são marcados como ruptura."
         )
 
-        if df_filtrado.empty or df_kardex.empty:
-            st.info("Nenhum SKU disponível com os filtros selecionados.")
+        if df_kardex_completo.empty:
+            st.info("Sem movimentações suficientes para montar o extrato diário.")
         else:
-            opcoes_sku_label = [
-                f"{r['SKU']} — {r['Descrição']} ({r['Categoria']} | {r['Marca']})"
-                for _, r in df_filtrado.iterrows()
-            ]
-            mapa_label_sku = dict(zip(opcoes_sku_label, df_filtrado["SKU"].astype(str)))
+            opcoes_sku_kardex = (
+                df_ind["SKU"].astype(str)
+                + " — "
+                + df_ind["Descrição"].astype(str)
+                + " ("
+                + df_ind["Categoria"].astype(str)
+                + ")"
+            ).tolist()
+            mapa_label_sku = dict(zip(opcoes_sku_kardex, df_ind["SKU"].astype(str).tolist()))
 
             sku_escolhido_label = st.selectbox(
-                "Escolha o produto para inspecionar o extrato diário:",
-                options=opcoes_sku_label,
-                key="select_inspetor_kardex",
+                "Selecione o produto para inspecionar o histórico diário:",
+                options=opcoes_sku_kardex,
+                key="select_sku_kardex",
             )
-            sku_sel = mapa_label_sku[sku_escolhido_label]
+            sku_selecionado = mapa_label_sku[sku_escolhido_label]
 
-            row_sku = df_filtrado[df_filtrado["SKU"].astype(str) == sku_sel].iloc[0]
-            df_k_sku = df_kardex[df_kardex["SKU"].astype(str) == sku_sel].copy()
+            row_sku = df_ind[df_ind["SKU"] == sku_selecionado].iloc[0]
+            df_k_sku = df_kardex_completo[df_kardex_completo["SKU"] == sku_selecionado].copy()
 
             k1, k2, k3, k4, k5 = st.columns(5)
-            k1.metric("Dias com Estoque", f"{int(row_sku['Dias_Com_Estoque'])} / {dias_reais_kardex} d")
+            k1.metric("Dias com Estoque", f"{int(row_sku['Dias_Com_Estoque'])} / {int(row_sku['Dias_Janela_Kardex'])} d")
             k2.metric("Dias Zerado (Passado)", f"{int(row_sku['Dias_Ruptura_Hist'])} d")
-            k3.metric("DMD Real (Dias c/ Estoque)", f"{row_sku['DMD_Real_Hist']:.2f} un./dia")
-            k4.metric(
+            k3.metric("DMD Real (Dias Disp.)", f"{row_sku['DMD_Real_Hist']:.2f} un/d")
+            k4.metric("Venda Perdida Hist.", _formatar_brl(float(row_sku["Perda_Financeira_Hist"])))
+            k5.metric(
                 "Margem Bruta / Líq.",
-                f"{_formatar_pct(row_sku['Margem_Bruta_Pct'])} / {_formatar_pct(row_sku['Margem_Liquida_Pct'])}",
+                f"{row_sku['Margem_Bruta_Pct']:.1f}% / {row_sku['Margem_Liquida_Pct']:.1f}%"
+                if pd.notna(row_sku["Margem_Bruta_Pct"])
+                else "Sem custo XML",
             )
-            k5.metric("Venda Perdida no Passado", _formatar_brl(float(row_sku["Perda_Financeira_Hist"])))
 
             st.line_chart(
                 df_k_sku.set_index("Data")["Saldo_Fechamento"],
@@ -995,6 +1017,7 @@ def renderizar_aba_indicadores():
                         "Data",
                         "Saldo_Abertura",
                         "Entradas",
+                        "Saldo_Disponivel",
                         "Saidas",
                         "Saldo_Fechamento",
                         "Situacao_Dia",
@@ -1003,9 +1026,10 @@ def renderizar_aba_indicadores():
                     columns={
                         "Saldo_Abertura": "Saldo Abertura",
                         "Entradas": "Entradas (+)",
+                        "Saldo_Disponivel": "Saldo Disponível",
                         "Saidas": "Saídas (-)",
                         "Saldo_Fechamento": "Saldo Fechamento",
-                        "Situacao_Dia": "Situação no Dia",
+                        "Situacao_Dia": "Situação no Dia (Regra Ouro)",
                     }
                 ),
                 use_container_width=True,
@@ -1014,91 +1038,104 @@ def renderizar_aba_indicadores():
 
             csv_kardex_sku = df_k_sku.to_csv(index=False, sep=";").encode("utf-8-sig")
             st.download_button(
-                label=f"📥 Baixar Extrato Diário do SKU {sku_sel} (.CSV)",
+                label=f"📥 Baixar Extrato Diário do SKU {sku_selecionado} (.CSV)",
                 data=csv_kardex_sku,
-                file_name=f"extrato_diario_{sku_sel}_{datetime.now().strftime('%Y-%m-%d')}.csv",
+                file_name=f"kardex_diario_{sku_selecionado}_{datetime.now().strftime('%Y-%m-%d')}.csv",
                 mime="text/csv",
                 use_container_width=True,
             )
 
     # --- SUB-ABA 3: CONSOLIDADO POR CATEGORIA E MARCA ---
     with tab_agrupado:
-        st.markdown("#### Visão Executiva por Categoria e por Marca")
-        tipo_agrupamento = st.radio(
-            "Agrupar indicadores por:",
+        st.subheader("Consolidado por Categoria e Marca")
+        visao_grupo = st.radio(
+            "Agrupar resultados por:",
             options=["Categoria", "Marca"],
             horizontal=True,
             key="radio_agrupamento_cat_marca",
         )
 
-        df_grupo = _gerar_resumo_agrupado(df_filtrado, tipo_agrupamento)
+        df_grupo = _agrupar_por_dimensao(df_ind, visao_grupo, float(pct_deducoes_despesas))
 
-        if df_grupo.empty:
-            st.info("Sem dados disponíveis para agrupar com os filtros atuais.")
-        else:
-            top_fat = df_grupo.sort_values("Faturamento_Realizado", ascending=False).iloc[0]
-            top_perda = df_grupo.sort_values("Venda_Perdida_Passado", ascending=False).iloc[0]
-            df_grupo_margem = df_grupo.dropna(subset=["Margem_Bruta_Pct"])
+        if not df_grupo.empty:
+            top_fat = df_grupo.iloc[0]
+            top_perda = df_grupo.sort_values(by="Venda_Perdida_Hist_RS", ascending=False).iloc[0]
 
             g1, g2, g3 = st.columns(3)
             g1.metric(
-                f"Líder em Faturamento ({tipo_agrupamento})",
-                str(top_fat[tipo_agrupamento]),
-                delta=_formatar_brl(float(top_fat["Faturamento_Realizado"])),
+                f"{visao_grupo} Líder em Faturamento",
+                str(top_fat[visao_grupo]),
+                delta=f"{_formatar_brl(float(top_fat['Faturamento_RS']))} ({top_fat['Participacao_Fat_Pct']:.1f}%)",
                 delta_color="off",
             )
-            if not df_grupo_margem.empty:
-                top_margem = df_grupo_margem.sort_values("Lucro_Bruto", ascending=False).iloc[0]
-                g2.metric(
-                    f"Maior Lucro Bruto ({tipo_agrupamento})",
-                    str(top_margem[tipo_agrupamento]),
-                    delta=f"{_formatar_brl(float(top_margem['Lucro_Bruto']))} ({_formatar_pct(top_margem['Margem_Bruta_Pct'])})",
-                    delta_color="off",
-                )
-            else:
-                g2.metric(
-                    f"Maior Lucro Bruto ({tipo_agrupamento})",
-                    "Sem custo XML",
-                    delta="Importe XML de compra",
-                    delta_color="off",
-                )
+            g2.metric(
+                f"Maior Venda Perdida ({visao_grupo})",
+                str(top_perda[visao_grupo]),
+                delta=f"-{_formatar_brl(float(top_perda['Venda_Perdida_Hist_RS']))} ({int(top_perda['Dias_Zerado_Total'])} dias zerado)",
+                delta_color="inverse" if float(top_perda["Venda_Perdida_Hist_RS"]) > 0 else "off",
+            )
             g3.metric(
-                f"Maior Perda por Ruptura ({tipo_agrupamento})",
-                str(top_perda[tipo_agrupamento]),
-                delta=f"-{_formatar_brl(float(top_perda['Venda_Perdida_Passado']))} perdidos" if top_perda["Venda_Perdida_Passado"] > 0 else "Sem perdas",
-                delta_color="inverse" if top_perda["Venda_Perdida_Passado"] > 0 else "off",
+                f"Total de {visao_grupo}s",
+                f"{len(df_grupo)}",
+                delta=f"Compra sugerida total: {int(df_grupo['Sugestao_Compra_Un'].sum())} un.",
+                delta_color="off",
             )
 
-            st.caption(f"Comparativo de Faturamento Realizado vs. Lucro Bruto vs. Venda Perdida por {tipo_agrupamento}")
-            chart_grupo = df_grupo.set_index(tipo_agrupamento)[
-                ["Faturamento_Realizado", "Lucro_Bruto", "Venda_Perdida_Passado"]
-            ].rename(
+            st.markdown(f"**Faturamento Realizado vs. Venda Perdida Histórica por {visao_grupo} (R$)**")
+            chart_df = df_grupo.set_index(visao_grupo)[["Faturamento_RS", "Lucro_Bruto_RS", "Venda_Perdida_Hist_RS"]].rename(
                 columns={
-                    "Faturamento_Realizado": "Faturamento Realizado (R$)",
-                    "Lucro_Bruto": "Lucro Bruto (R$)",
-                    "Venda_Perdida_Passado": "Venda Perdida no Passado (R$)",
+                    "Faturamento_RS": "Faturamento Realizado (R$)",
+                    "Lucro_Bruto_RS": "Lucro Bruto (R$)",
+                    "Venda_Perdida_Hist_RS": "Venda Perdida Passado (R$)",
                 }
             )
-            st.bar_chart(chart_grupo, use_container_width=True)
+            st.bar_chart(chart_df, use_container_width=True)
+
+            df_grupo_exib = df_grupo.copy()
+            df_grupo_exib["Margem_Bruta_Exib"] = df_grupo_exib["Margem_Bruta_Pct"].apply(
+                lambda x: f"{x:.1f}%" if pd.notna(x) else "Sem custo"
+            )
+            df_grupo_exib["Margem_Liq_Exib"] = df_grupo_exib["Margem_Liquida_Pct"].apply(
+                lambda x: f"{x:.1f}%" if pd.notna(x) else "Sem custo"
+            )
+
+            cols_grupo_exib = [
+                visao_grupo,
+                "Qtd_SKUs",
+                "Disponibilidade_Media_Pct",
+                "Dias_Zerado_Total",
+                "SKUs_Ruptura_Hoje",
+                "Faturamento_RS",
+                "Participacao_Fat_Pct",
+                "Lucro_Bruto_RS",
+                "Margem_Bruta_Exib",
+                "Lucro_Liquido_Est_RS",
+                "Margem_Liq_Exib",
+                "Venda_Perdida_Hist_RS",
+                "Lucro_Bruto_Perdido_RS",
+                "Capital_Estoque_RS",
+                "Giro_Medio",
+                "Sugestao_Compra_Un",
+            ]
 
             st.dataframe(
-                df_grupo.rename(
+                df_grupo_exib[cols_grupo_exib].rename(
                     columns={
                         "Qtd_SKUs": "SKUs",
-                        "SKUs_Ruptura_Atual": "Ruptura Hoje",
-                        "SKUs_Faltaram_Passado": "Faltaram no Passado",
                         "Disponibilidade_Media_Pct": "Disponib. Média (%)",
-                        "Faturamento_Realizado": "Faturamento (R\$)",
-                        "Lucro_Bruto": "Lucro Bruto (R\$)",
-                        "Margem_Bruta_Pct": "Margem Bruta (%)",
-                        "Lucro_Liquido_Est": "Lucro Líq. Est. (R\$)",
-                        "Margem_Liquida_Pct": "Margem Líq. (%)",
-                        "Venda_Perdida_Passado": "Venda Perdida (R\$)",
-                        "Lucro_Bruto_Perdido": "Lucro Bruto Perdido (R\$)",
-                        "Receita_Potencial": "Receita Potencial (R\$)",
-                        "Capital_Estoque": "Capital Estoque (R\$)",
+                        "Dias_Zerado_Total": "Dias Zerado (Soma)",
+                        "SKUs_Ruptura_Hoje": "Ruptura Hoje",
+                        "Faturamento_RS": "Faturamento (R\$)",
+                        "Participacao_Fat_Pct": "% Receita",
+                        "Lucro_Bruto_RS": "Lucro Bruto (R\$)",
+                        "Margem_Bruta_Exib": "Margem Bruta",
+                        "Lucro_Liquido_Est_RS": "Lucro Líq. Est. (R\$)",
+                        "Margem_Liq_Exib": "Margem Líq. Est.",
+                        "Venda_Perdida_Hist_RS": "Venda Perdida Hist. (R\$)",
+                        "Lucro_Bruto_Perdido_RS": "Lucro Bruto Perdido (R\$)",
+                        "Capital_Estoque_RS": "Capital Estoque (R\$)",
                         "Giro_Medio": "Giro Médio",
-                        "Sugestao_Compra_Un": "Compra Sugerida (un.)",
+                        "Sugestao_Compra_Un": "Sugestão Compra (un.)",
                     }
                 ),
                 use_container_width=True,
@@ -1107,42 +1144,36 @@ def renderizar_aba_indicadores():
 
             csv_grupo = df_grupo.to_csv(index=False, sep=";").encode("utf-8-sig")
             st.download_button(
-                label=f"📥 Baixar Consolidado por {tipo_agrupamento} (.CSV)",
+                label=f"📥 Baixar Consolidado por {visao_grupo} (.CSV)",
                 data=csv_grupo,
-                file_name=f"consolidado_{tipo_agrupamento.lower()}_{datetime.now().strftime('%Y-%m-%d_%H-%M')}.csv",
+                file_name=f"consolidado_{visao_grupo.lower()}_{datetime.now().strftime('%Y-%m-%d_%H-%M')}.csv",
                 mime="text/csv",
                 use_container_width=True,
             )
 
     # --- SUB-ABA 4: EVOLUÇÃO DIÁRIA GERAL ---
-    with tab_graficos:
-        col_g1, col_g2 = st.columns(2)
+    with tab_evolucao:
         if df_movs is not None and not df_movs.empty and "Data_Emissao" in df_movs.columns:
-            skus_filtrados_set = set(df_filtrado["SKU"].astype(str))
             df_saidas_dia = df_movs[
-                (df_movs["Tipo"] == "Saída")
-                & (df_movs["Data_Emissao"] != "")
-                & (df_movs["SKU"].astype(str).isin(skus_filtrados_set))
+                (df_movs["Tipo"] == "Saída") & (df_movs["Data_Emissao"] != "")
             ].copy()
             if not df_saidas_dia.empty:
-                with col_g1:
-                    st.markdown("#### Volume Diário de Vendas (Unidades)")
-                    resumo_diario = (
-                        df_saidas_dia.groupby("Data_Emissao", as_index=False)["Quantidade"]
-                        .sum()
-                        .sort_values("Data_Emissao")
-                    )
-                    st.bar_chart(resumo_diario.set_index("Data_Emissao")["Quantidade"])
+                st.subheader("Evolução Diária de Vendas (Unidades)")
+                resumo_diario = (
+                    df_saidas_dia.groupby("Data_Emissao", as_index=False)["Quantidade"]
+                    .sum()
+                    .sort_values("Data_Emissao")
+                )
+                st.bar_chart(resumo_diario.set_index("Data_Emissao")["Quantidade"])
 
-        if not df_kardex.empty and not df_filtrado.empty:
-            skus_filtrados_set = set(df_filtrado["SKU"].astype(str))
-            df_kardex_filt = df_kardex[df_kardex["SKU"].astype(str).isin(skus_filtrados_set)]
-            if not df_kardex_filt.empty:
-                with col_g2:
-                    st.markdown("#### Histórico Diário de Ruptura (SKUs Zerados/Dia)")
-                    ruptura_por_dia = (
-                        df_kardex_filt.groupby("Data", as_index=False)["Em_Ruptura"]
-                        .sum()
-                        .sort_values("Data")
-                    )
-                    st.line_chart(ruptura_por_dia.set_index("Data")["Em_Ruptura"])
+        if not df_kardex_completo.empty:
+            st.subheader("Evolução Diária de SKUs em Ruptura (Prateleira Vazia sem Saída)")
+            ruptura_por_dia = (
+                df_kardex_completo.assign(
+                    Em_Ruptura=lambda d: np.where(d["Situacao_Dia"] == "🔴 Zerado / Ruptura", 1, 0)
+                )
+                .groupby("Data", as_index=False)["Em_Ruptura"]
+                .sum()
+                .sort_values("Data")
+            )
+            st.line_chart(ruptura_por_dia.set_index("Data")["Em_Ruptura"])
