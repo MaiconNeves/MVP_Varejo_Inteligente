@@ -1002,6 +1002,7 @@ def renderizar_aba_indicadores():
 			"Auditoria dia a dia pela Regra Ouro: o dia em que a última unidade é vendida conta como disponível; "
 			"apenas dias seguintes com prateleira vazia e sem saída são marcados como ruptura."
 		)
+		
 		if df_kardex_completo.empty:
 			st.info("Sem movimentações suficientes para montar o extrato diário.")
 		else:
@@ -1014,42 +1015,45 @@ def renderizar_aba_indicadores():
 				+ ")"
 			).tolist()
 			mapa_label_sku = dict(zip(opcoes_sku_kardex, df_ind["SKU"].astype(str).tolist()))
+			
 			sku_escolhido_label = st.selectbox(
 				"Selecione o produto para inspecionar o histórico diário:",
 				options=opcoes_sku_kardex,
 				key="select_sku_kardex",
 			)
 			sku_selecionado = mapa_label_sku[sku_escolhido_label]
+			
 			row_sku = df_ind[df_ind["SKU"] == sku_selecionado].iloc[0]
 			df_k_sku = df_kardex_completo[df_kardex_completo["SKU"] == sku_selecionado].copy()
 
-			# --- NOVO: Conta quantas vezes o SKU apareceu nos XMLs por dia ---
-			df_k_sku["Aparicoes_XML"] = 0
-			if not df_movs.empty and "SKU" in df_movs.columns and "Data" in df_movs.columns:
-				df_mov_sku = df_movs[df_movs["SKU"].astype(str).str.strip() == str(sku_selecionado).strip()].copy()
-				if not df_mov_sku.empty:
-					# Padroniza o formato da data para cruzar com df_k_sku["Data"]
-					df_mov_sku["_Data_Str"] = pd.to_datetime(df_mov_sku["Data"]).dt.strftime("%Y-%m-%d")
-					df_k_sku["_Data_Str"] = pd.to_datetime(df_k_sku["Data"]).dt.strftime("%Y-%m-%d")
-					contagem_xml = df_mov_sku.groupby("_Data_Str").size().to_dict()
-					df_k_sku["Aparicoes_XML"] = df_k_sku["_Data_Str"].map(contagem_xml).fillna(0).astype(int)
-					df_k_sku.drop(columns=["_Data_Str"], inplace=True)
+            # --- NOVO: Conta quantas vezes o SKU apareceu nos XMLs por dia ---
+            df_k_sku["Aparicoes_XML"] = 0
+            if not df_movs.empty and "SKU" in df_movs.columns and "Data" in df_movs.columns:
+                df_mov_sku = df_movs[df_movs["SKU"].astype(str).str.strip() == str(sku_selecionado).strip()].copy()
+                if not df_mov_sku.empty:
+                    # Padroniza o formato da data para cruzar com df_k_sku["Data"]
+                    df_mov_sku["_Data_Str"] = pd.to_datetime(df_mov_sku["Data"]).dt.strftime("%Y-%m-%d")
+                    df_k_sku["_Data_Str"] = pd.to_datetime(df_k_sku["Data"]).dt.strftime("%Y-%m-%d")
+                    contagem_xml = df_mov_sku.groupby("_Data_Str").size().to_dict()
+                    df_k_sku["Aparicoes_XML"] = df_k_sku["_Data_Str"].map(contagem_xml).fillna(0).astype(int)
+                    df_k_sku.drop(columns=["_Data_Str"], inplace=True)
 
-			k1, k2, k3, k4, k5 = st.columns(5)
-			k1.metric("Dias com Estoque", f"{int(row_sku['Dias_Com_Estoque'])} / {int(row_sku['Dias_Janela_Kardex'])} d")
-			k2.metric("Dias Zerado (Passado)", f"{int(row_sku['Dias_Ruptura_Hist'])} d")
-			k3.metric("DMD Real (Dias Disp.)", f"{row_sku['DMD_Real_Hist']:.2f} un/d")
-			k4.metric("Venda Perdida Hist.", _formatar_brl(float(row_sku["Perda_Financeira_Hist"])))
-			k5.metric(
-				"Margem Bruta / Líq.",
-				f"{row_sku['Margem_Bruta_Pct']:.1f}% / {row_sku['Margem_Liquida_Pct']:.1f}%"
-				if pd.notna(row_sku["Margem_Bruta_Pct"])
-				else "Sem custo XML",
-			)
-			st.line_chart(
-				df_k_sku.set_index("Data")["Saldo_Fechamento"],
-				use_container_width=True,
-			)
+            k1, k2, k3, k4, k5 = st.columns(5)
+            k1.metric("Dias com Estoque", f"{int(row_sku['Dias_Com_Estoque'])} / {int(row_sku['Dias_Janela_Kardex'])} d")
+            k2.metric("Dias Zerado (Passado)", f"{int(row_sku['Dias_Ruptura_Hist'])} d")
+            k3.metric("DMD Real (Dias Disp.)", f"{row_sku['DMD_Real_Hist']:.2f} un/d")
+            k4.metric("Venda Perdida Hist.", _formatar_brl(float(row_sku["Perda_Financeira_Hist"])))
+            k5.metric(
+                "Margem Bruta / Líq.",
+                f"{row_sku['Margem_Bruta_Pct']:.1f}% / {row_sku['Margem_Liquida_Pct']:.1f}%"
+                if pd.notna(row_sku["Margem_Bruta_Pct"])
+                else "Sem custo XML",
+            )
+            st.line_chart(
+                df_k_sku.set_index("Data")["Saldo_Fechamento"],
+                use_container_width=True,
+            )
+
 			st.dataframe(
 				df_k_sku[
 					[
